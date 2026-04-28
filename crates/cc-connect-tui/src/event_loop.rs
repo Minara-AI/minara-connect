@@ -109,8 +109,11 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let mut app = App::new(&opts.topic_hex, &opts.ticket, init_rows, init_cols);
     app.push_chat(
         ChatLineKind::System,
-        format!("Hosting room {} — Tab switches pane, Ctrl-Q quits", &app.topic_short),
+        format!("Room {} — Tab switches pane, Ctrl-Q quits, Ctrl-Y reprints ticket", &app.topic_short),
     );
+    // Print the full ticket so the user can share it. ~250 chars, will wrap.
+    app.push_chat(ChatLineKind::System, "Share this ticket to invite peers:".to_string());
+    app.push_chat(ChatLineKind::Marker, opts.ticket.clone());
 
     // ---- 4. Run the loop ---------------------------------------------------
     let mut crossterm_events = EventStream::new();
@@ -208,12 +211,13 @@ fn draw(f: &mut Frame, app: &App) {
         .split(area);
     draw_header(f, chunks[0], app);
 
+    // claude on the left (wide, code-friendly), chat on the right (narrow).
     let panes = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(chunks[1]);
-    chat_pane::render(f, panes[0], app);
-    claude_pane::render(f, panes[1], app);
+    claude_pane::render(f, panes[0], app);
+    chat_pane::render(f, panes[1], app);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
@@ -221,7 +225,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         " cc-connect  room={}  ",
         app.topic_short,
     );
-    let hint = " [Tab] switch pane   [Ctrl-Q] quit ";
+    let hint = " [Tab] switch pane   [Ctrl-Y] reprint ticket   [Ctrl-Q] quit ";
     let line = Line::from(vec![
         Span::styled(label, Style::default().fg(Color::Black).bg(Color::Cyan)),
         Span::styled(
@@ -249,6 +253,17 @@ async fn handle_key(
         match key.code {
             KeyCode::Char('q') => {
                 app.should_exit = true;
+                return;
+            }
+            KeyCode::Char('y') => {
+                // Re-print the ticket as a chat scrollback line so the user
+                // can find + copy it without scrolling all the way up.
+                let ticket = app.ticket.clone();
+                app.push_chat(
+                    ChatLineKind::System,
+                    "Share this ticket to invite peers:".to_string(),
+                );
+                app.push_chat(ChatLineKind::Marker, ticket);
                 return;
             }
             KeyCode::Char('c') if app.focus == Focus::Chat => {
