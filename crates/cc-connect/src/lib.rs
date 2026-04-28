@@ -11,6 +11,7 @@ pub mod chat_session;
 pub mod doctor;
 pub mod host;
 pub mod host_bg;
+pub mod room;
 pub mod ticket_payload;
 
 use anyhow::Result;
@@ -55,6 +56,13 @@ pub enum Command {
         #[arg(long, value_name = "URL")]
         relay: Option<String>,
     },
+    /// Open the cc-connect TUI: vertical split with chat on the left and an
+    /// embedded `claude` PTY on the right. Thin wrapper around the
+    /// `cc-connect-tui` binary that ships next to this one.
+    Room {
+        #[command(subcommand)]
+        cmd: RoomCmd,
+    },
     /// Run, manage, and inspect persistent host daemons.
     ///
     /// A host daemon owns a Room's topic + identity in the background,
@@ -74,6 +82,21 @@ pub enum Command {
     },
     /// Sanity-check the cc-connect installation.
     Doctor,
+}
+
+#[derive(Subcommand)]
+pub enum RoomCmd {
+    /// Start a new Room (spawns a background host daemon) and open the TUI.
+    Start {
+        #[arg(long, value_name = "URL")]
+        relay: Option<String>,
+    },
+    /// Join an existing Room by ticket.
+    Join {
+        ticket: String,
+        #[arg(long, value_name = "URL")]
+        relay: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -100,6 +123,10 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Chat { ticket, no_relay, relay } => {
             chat::run(&ticket, no_relay, relay.as_deref())
         }
+        Command::Room { cmd } => match cmd {
+            RoomCmd::Start { relay } => room::run_start(relay.as_deref()),
+            RoomCmd::Join { ticket, relay } => room::run_join(&ticket, relay.as_deref()),
+        },
         Command::HostBg { cmd } => match cmd {
             HostBgCmd::Start { relay } => host_bg::run_start(relay.as_deref()),
             HostBgCmd::Stop { topic } => host_bg::run_stop(&topic),

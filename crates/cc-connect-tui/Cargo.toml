@@ -1,0 +1,40 @@
+[package]
+name = "cc-connect-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "cc-connect terminal UI: chat panel + embedded Claude Code (PTY) for the `cc-connect room` orchestrator."
+
+[lib]
+name = "cc_connect_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cc-connect-tui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+cc-connect = { path = "../cc-connect" }
+cc-connect-core = { path = "../cc-connect-core" }
+
+# Rendering / input.
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+
+# PTY for embedding `claude` (or any other terminal child).
+portable-pty = "0.9"
+
+# Terminal emulator that owns the screen state for the right pane.
+vt100 = "0.16"
+tui-term = "0.3"
+
+# Async stream utilities for the crossterm event loop.
+futures-lite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

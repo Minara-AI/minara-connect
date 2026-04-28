@@ -89,7 +89,35 @@ If you'd rather not run the script, the equivalent steps:
 
 ## Usage
 
-### Host a room
+### TUI mode (recommended)
+
+One command, two panes — chat on the left, your Claude Code embedded on the right:
+
+```bash
+# Start a brand-new room (spawns a background host daemon, opens the TUI)
+$ ./target/release/cc-connect room start
+
+# Or join an existing room by ticket
+$ ./target/release/cc-connect room join cc1-…
+```
+
+```
+┌──────────┬─────────────────────────┐
+│ chat     │  claude code            │
+│  alice   │   $ ls                  │
+│  > body  │   src/  README.md       │
+│          │   $                     │
+│ [type… ] │                         │
+└──────────┴─────────────────────────┘
+```
+
+**Why this is nicer than running `host` and `chat` separately:**
+
+- The Claude Code in the right pane only sees *this* room's chat — even if you have ten TUI windows open across ten projects, they don't cross-pollinate. Routing is by `CC_CONNECT_ROOM` env var read by the hook.
+- `room start` spawns a `cc-connect host-bg` daemon that survives the TUI window. Close the TUI, the room stays joinable. Stop the daemon explicitly with `cc-connect host-bg stop <topic-prefix>` (or `cc-connect host-bg list` to see what's running).
+- `Tab` switches focus between panes. `Ctrl-Q` quits. Standard Claude Code keybindings work in the right pane.
+
+### Host a room (without the TUI)
 
 ```bash
 $ ./target/release/cc-connect host
@@ -224,8 +252,9 @@ cc-connect/
 ├── CONTEXT.md               Domain glossary (DDD-style)
 ├── docs/adr/                Architecture decision records (1-4)
 ├── crates/
-│   ├── cc-connect-core/     Protocol primitives library (62 tests)
-│   ├── cc-connect/          host / chat / doctor binary
+│   ├── cc-connect-core/     Protocol primitives library (71 tests)
+│   ├── cc-connect/          host / chat / room / host-bg / doctor binary
+│   ├── cc-connect-tui/      TUI binary (cc-connect-tui) + library
 │   └── cc-connect-hook/     UserPromptSubmit hook binary
 ├── tests/                   FAKE-CLAUDE-CODE integration test
 ├── vendored/                Patched ed25519 + ed25519-dalek (temporary,

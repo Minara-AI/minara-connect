@@ -4,6 +4,7 @@ members = [
     "crates/cc-connect-core",
     "crates/cc-connect",
     "crates/cc-connect-hook",
+    "crates/cc-connect-tui",
 ]
 
 [workspace.package]
