@@ -6,6 +6,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod doctor;
+
 #[derive(Parser)]
 #[command(name = "cc-connect", version, about)]
 struct Cli {
@@ -31,7 +33,7 @@ fn main() -> Result<()> {
     match cli.cmd {
         Command::Host => host(),
         Command::Chat { ticket } => chat(&ticket),
-        Command::Doctor => doctor(),
+        Command::Doctor => doctor::run(),
     }
 }
 
@@ -44,9 +46,4 @@ fn chat(_ticket: &str) -> Result<()> {
     // PROTOCOL.md §3 (Ticket decode), §6.1 (gossip), §6.2 (Backfill),
     // §8 (active-rooms PID file lifecycle).
     todo!("decode ticket, join gossip, backfill, register active-room, run REPL")
-}
-
-fn doctor() -> Result<()> {
-    // PROTOCOL.md §7.1 (hook PATH check) and §8 (active-rooms parent dir mode).
-    todo!("verify settings.json hook entry, identity.key mode, /tmp dir mode, NTP skew")
 }

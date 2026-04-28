@@ -26,7 +26,7 @@ serde_json = "1"
 # CLI
 clap = { version = "4", features = ["derive"] }
 # filesystem syscalls (fcntl OFD byte-range locking, etc.)
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 # test helpers
 tempfile = "3"
 

@@ -86,6 +86,9 @@ dependencies = [
  "anyhow",
  "cc-connect-core",
  "clap",
+ "rustix",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
