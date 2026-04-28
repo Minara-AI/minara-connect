@@ -7,10 +7,10 @@
 //! exclusive lock; readers take a shared lock.
 
 use crate::message::Message;
-use anyhow::{anyhow, bail, Context, Result};
+use crate::posix::{acquire_lock, release_lock, LockKind};
+use anyhow::{bail, Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
-use std::os::fd::AsFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
@@ -115,27 +115,6 @@ pub fn read_since(file: &mut File, cursor: Option<&str>) -> Result<Vec<Message>>
 
     let _ = release_lock(file);
     result
-}
-
-#[derive(Copy, Clone)]
-enum LockKind {
-    Shared,
-    Exclusive,
-}
-
-fn acquire_lock(file: &File, kind: LockKind) -> Result<()> {
-    use rustix::fs::{fcntl_lock, FlockOperation};
-    let op = match kind {
-        LockKind::Shared => FlockOperation::LockShared,
-        LockKind::Exclusive => FlockOperation::LockExclusive,
-    };
-    fcntl_lock(file.as_fd(), op).map_err(|e| anyhow!("fcntl lock acquire: {e}"))
-}
-
-fn release_lock(file: &File) -> Result<()> {
-    use rustix::fs::{fcntl_lock, FlockOperation};
-    fcntl_lock(file.as_fd(), FlockOperation::Unlock)
-        .map_err(|e| anyhow!("fcntl lock release: {e}"))
 }
 
 #[cfg(test)]
