@@ -1,12 +1,7 @@
 //! Right pane: the embedded `claude` PTY rendered through tui-term.
-//!
-//! The vt100 parser (owned by [`crate::app::App`]) holds the screen state.
-//! We feed bytes into it from the PTY reader on the event loop, then render
-//! the screen here every tick.
 
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::Span,
     widgets::{Block, Borders},
     Frame,
@@ -14,21 +9,20 @@ use ratatui::{
 use tui_term::widget::PseudoTerminal;
 
 use crate::app::{App, Focus};
+use crate::theme;
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus == Focus::Claude;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        theme::border_focused()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::border_unfocused()
     };
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(theme::BORDER_TYPE)
         .border_style(border_style)
-        .title(Span::styled(
-            " claude code ",
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
+        .title(Span::styled(" 🤖 claude ", theme::pane_title()));
     let screen = app.vt_parser.screen();
     let widget = PseudoTerminal::new(screen).block(block);
     frame.render_widget(widget, area);

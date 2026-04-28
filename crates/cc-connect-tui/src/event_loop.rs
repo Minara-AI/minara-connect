@@ -22,7 +22,6 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame, Terminal,
@@ -30,7 +29,7 @@ use ratatui::{
 use tokio::sync::mpsc;
 
 use crate::app::{App, ChatLineKind, Focus};
-use crate::{chat_pane, claude_pane};
+use crate::{chat_pane, claude_pane, theme};
 
 /// Caller-supplied configuration for [`run`].
 pub struct RunOpts {
@@ -221,19 +220,11 @@ fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
-    let label = format!(
-        " cc-connect  room={}  ",
-        app.topic_short,
-    );
-    let hint = " [Tab] switch pane   [Ctrl-Y] reprint ticket   [Ctrl-Q] quit ";
+    let label = format!(" cc-connect · room {} ", app.topic_short);
+    let hint = " [F2 / Tab] switch pane   [Ctrl-Y] reprint ticket   [Ctrl-Q] quit ";
     let line = Line::from(vec![
-        Span::styled(label, Style::default().fg(Color::Black).bg(Color::Cyan)),
-        Span::styled(
-            hint,
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        ),
+        Span::styled(label, theme::header_chip()),
+        Span::styled(hint, theme::header_hint()),
     ]);
     f.render_widget(Paragraph::new(line), area);
 }
@@ -274,14 +265,19 @@ async fn handle_key(
             _ => {}
         }
     }
+    // F2 is the global "switch focus" key — works from BOTH panes, doesn't
+    // collide with anything Claude Code uses. Tab from chat is a one-way
+    // convenience (Tab inside Claude is autocomplete; we forward it).
+    if key.code == KeyCode::F(2) {
+        app.toggle_focus();
+        return;
+    }
     if key.code == KeyCode::Tab && key.modifiers.is_empty() && app.focus == Focus::Chat {
-        // Tab in chat pane switches focus (Tab inside Claude is too useful
-        // to steal — chat pane gets the toggle responsibility).
         app.toggle_focus();
         return;
     }
     if key.code == KeyCode::BackTab {
-        // Shift-Tab from anywhere swaps focus.
+        // Shift-Tab from anywhere swaps focus too.
         app.toggle_focus();
         return;
     }

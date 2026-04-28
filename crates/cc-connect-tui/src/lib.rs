@@ -9,5 +9,6 @@ pub mod app;
 pub mod chat_pane;
 pub mod claude_pane;
 pub mod event_loop;
+pub mod theme;
 
 pub use event_loop::{run, RunOpts};
