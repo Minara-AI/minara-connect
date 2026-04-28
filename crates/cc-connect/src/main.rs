@@ -6,6 +6,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod chat;
 mod doctor;
 mod host;
 mod ticket_payload;
@@ -34,13 +35,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Command::Host => host::run(),
-        Command::Chat { ticket } => chat(&ticket),
+        Command::Chat { ticket } => chat::run(&ticket),
         Command::Doctor => doctor::run(),
     }
-}
-
-fn chat(_ticket: &str) -> Result<()> {
-    // PROTOCOL.md §3 (Ticket decode), §6.1 (gossip), §6.2 (Backfill),
-    // §8 (active-rooms PID file lifecycle).
-    todo!("decode ticket, join gossip, backfill, register active-room, run REPL")
 }

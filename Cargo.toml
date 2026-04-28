@@ -25,6 +25,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # postcard is the canonical iroh-gossip Ticket encoding (see chat.rs example).
 postcard = { version = "1", features = ["alloc"] }
+# ULID generation for new Messages (PROTOCOL.md §4 id field).
+ulid = "1"
+# bytes::Bytes is iroh-gossip's broadcast payload type.
+bytes = "1"
+# Stream combinators on iroh-gossip's Receiver (matches the iroh-gossip
+# examples/chat.rs convention).
+futures-lite = "2"
 # CLI
 clap = { version = "4", features = ["derive"] }
 # filesystem syscalls (fcntl OFD byte-range locking, etc.)
