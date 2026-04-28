@@ -26,3 +26,6 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 ulid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
