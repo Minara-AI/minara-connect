@@ -32,6 +32,11 @@ pub const FILE_DROP_MAX_BYTES: u64 = 1 << 30;
 /// Length of a hex-encoded BLAKE3 hash (iroh-blobs Hash on the wire).
 pub const BLOB_HASH_HEX_LEN: usize = 64;
 
+/// Self-declared nickname cap. Receivers MUST drop Messages whose `nick`
+/// exceeds this. Picked to keep the chatroom prefix narrow on real
+/// terminals — 64 bytes leaves plenty of room for emoji + Han characters.
+pub const NICK_MAX_BYTES: usize = 64;
+
 /// A v0.1 chat Message.
 ///
 /// Field order in the struct matches PROTOCOL.md §4's canonical JSON order
@@ -49,6 +54,12 @@ pub struct Message {
     pub body: String,
     #[serde(default = "default_kind", skip_serializing_if = "is_default_kind")]
     pub kind: String,
+    /// v0.2 self-declared display name. Optional — receivers fall back to a
+    /// short prefix of `author` when absent. Capped at `NICK_MAX_BYTES`;
+    /// must contain no control characters. Forward-compatible: v0.1
+    /// receivers ignore this field per §4 unknown-fields rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nick: Option<String>,
     /// v0.2 file_drop: 64-char lowercase hex iroh-blobs BLAKE3 hash. Receivers
     /// dial `author`'s NodeId over the iroh-blobs ALPN to fetch the bytes.
     /// `None` for chat messages.
@@ -81,9 +92,20 @@ impl Message {
             ts,
             body,
             kind: KIND_CHAT.to_string(),
+            nick: None,
             blob_hash: None,
             blob_size: None,
         })
+    }
+
+    /// Builder: attach a self-declared nickname (v0.2). Validates per
+    /// `validate_nick`. Pass `None` to clear an existing nick.
+    pub fn with_nick(mut self, nick: Option<String>) -> Result<Self> {
+        if let Some(ref n) = nick {
+            validate_nick(n)?;
+        }
+        self.nick = nick;
+        Ok(self)
     }
 
     /// Construct a file_drop Message (v0.2).
@@ -113,6 +135,7 @@ impl Message {
             ts,
             body: filename,
             kind: KIND_FILE_DROP.to_string(),
+            nick: None,
             blob_hash: Some(blob_hash),
             blob_size: Some(blob_size),
         })
@@ -168,6 +191,9 @@ impl Message {
                 )
             }
         }
+        if let Some(ref n) = msg.nick {
+            validate_nick(n)?;
+        }
         msg.id = normalize_ulid(&msg.id)?;
         Ok(msg)
     }
@@ -214,6 +240,23 @@ fn validate_blob_size(size: u64) -> Result<()> {
             size,
             FILE_DROP_MAX_BYTES
         );
+    }
+    Ok(())
+}
+
+fn validate_nick(nick: &str) -> Result<()> {
+    if nick.is_empty() {
+        bail!("NICK_EMPTY: if present, nick must be non-empty");
+    }
+    if nick.len() > NICK_MAX_BYTES {
+        bail!(
+            "NICK_TOO_LARGE: {} bytes exceeds the {} byte cap",
+            nick.len(),
+            NICK_MAX_BYTES
+        );
+    }
+    if nick.chars().any(|c| c.is_control()) {
+        bail!("NICK_INVALID: nick MUST NOT contain control characters");
     }
     Ok(())
 }

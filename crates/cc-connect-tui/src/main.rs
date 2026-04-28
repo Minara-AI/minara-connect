@@ -76,10 +76,13 @@ fn main() -> Result<()> {
 }
 
 async fn start(relay: Option<&str>, claude_args: Vec<String>) -> Result<()> {
-    // First-run wizard: hook + relay choice. Both prompt on stdin BEFORE
-    // we hold the alt-screen, so it's a normal terminal interaction.
+    // First-run wizard: hook + nick + relay choice. Prompts use plain
+    // stdin/stdout BEFORE the alt-screen takes over, so they look normal.
     if let Err(e) = setup::ensure_hook_installed() {
         eprintln!("(setup: hook check failed: {e:#})");
+    }
+    if let Err(e) = setup::ensure_self_nick() {
+        eprintln!("(setup: nick prompt failed: {e:#})");
     }
     let resolved_relay = setup::ensure_relay_choice(relay).unwrap_or_else(|e| {
         eprintln!("(setup: relay prompt failed: {e:#}; defaulting to n0)");
@@ -132,6 +135,9 @@ async fn start(relay: Option<&str>, claude_args: Vec<String>) -> Result<()> {
 async fn join(ticket: &str, relay: Option<&str>, claude_args: Vec<String>) -> Result<()> {
     if let Err(e) = setup::ensure_hook_installed() {
         eprintln!("(setup: hook check failed: {e:#})");
+    }
+    if let Err(e) = setup::ensure_self_nick() {
+        eprintln!("(setup: nick prompt failed: {e:#})");
     }
     enter_tui(ticket.to_string(), relay, claude_args).await
 }

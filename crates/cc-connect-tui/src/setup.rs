@@ -163,6 +163,40 @@ fn install_hook(settings: &Path, hook_path: &Path) -> Result<()> {
     Ok(())
 }
 
+// ---- Self nickname --------------------------------------------------------
+
+/// Read `self_nick` from `~/.cc-connect/config.json`. If absent, prompt
+/// once and persist. Empty answer = the user wants no nick (we save an
+/// empty string so we don't ask again).
+pub fn ensure_self_nick() -> Result<Option<String>> {
+    let cfg_path = config_path();
+    let mut cfg = read_config(&cfg_path).unwrap_or_default();
+    if cfg.self_nick.is_some() {
+        return Ok(cfg.self_nick.filter(|s| !s.is_empty()));
+    }
+    println!();
+    println!("Pick a display name (other peers see this as your sender label).");
+    println!("Leave blank to use a short pubkey prefix.");
+    let raw = match read_line("Display name: ") {
+        Ok(s) => s,
+        Err(_) => String::new(),
+    };
+    let nick = raw.trim().to_string();
+    if nick.len() > cc_connect_core::message::NICK_MAX_BYTES {
+        bail!(
+            "nickname too long ({} > {} bytes); shorten and re-run",
+            nick.len(),
+            cc_connect_core::message::NICK_MAX_BYTES
+        );
+    }
+    if nick.chars().any(|c| c.is_control()) {
+        bail!("nickname must not contain control characters");
+    }
+    cfg.self_nick = Some(nick.clone());
+    write_config(&cfg_path, &cfg)?;
+    Ok(if nick.is_empty() { None } else { Some(nick) })
+}
+
 // ---- Relay config (start mode only) ----------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -173,6 +207,10 @@ struct ConnectConfig {
     /// Set when relay_mode = "custom".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     relay_url: Option<String>,
+    /// User's self-declared display name. Picked up by chat_session and
+    /// emitted as the v0.2 `nick` field on outgoing Messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    self_nick: Option<String>,
 }
 
 const CONFIG_FILENAME: &str = "config.json";
@@ -199,28 +237,21 @@ pub fn ensure_relay_choice(provided: Option<&str>) -> Result<Option<String>> {
         _ => {}
     }
     let answer = prompt_relay_choice()?;
-    let (new_cfg, returned) = match answer {
-        RelayChoice::N0 => (
-            ConnectConfig {
-                relay_mode: Some("n0".to_string()),
-                relay_url: None,
-            },
-            None,
-        ),
+    // Preserve any existing self_nick when we rewrite the config.
+    let preserved_nick = cfg.self_nick.clone();
+    let (relay_mode, relay_url, returned) = match answer {
+        RelayChoice::N0 => (Some("n0".to_string()), None, None),
         RelayChoice::Custom(url) => (
-            ConnectConfig {
-                relay_mode: Some("custom".to_string()),
-                relay_url: Some(url.clone()),
-            },
+            Some("custom".to_string()),
+            Some(url.clone()),
             Some(url),
         ),
-        RelayChoice::Skip => (
-            ConnectConfig {
-                relay_mode: Some("skip".to_string()),
-                relay_url: None,
-            },
-            None,
-        ),
+        RelayChoice::Skip => (Some("skip".to_string()), None, None),
+    };
+    let new_cfg = ConnectConfig {
+        relay_mode,
+        relay_url,
+        self_nick: preserved_nick,
     };
     write_config(&cfg_path, &new_cfg)?;
     Ok(returned)

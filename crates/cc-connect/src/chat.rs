@@ -76,11 +76,18 @@ async fn run_async(ticket_str: &str, no_relay: bool, relay: Option<&str>) -> Res
         r = &mut handle.join => r.context("chat session task panicked")?,
         _ = tokio::signal::ctrl_c() => {
             println!("\n[chat] Ctrl-C — leaving room");
+            // Force the chat session to unwind: aborting handle.join drops
+            // its run_session future, which drops display_tx and the
+            // listener task. stdout_task then sees None on display_rx and
+            // exits. Without this, stdin_task's detached read_line still
+            // holds an input_tx clone, so the chat session would never
+            // realise the user wanted to leave.
+            handle.join.abort();
             Ok(())
         }
     };
 
-    drop(stdin_task);
+    stdin_task.abort();
     let _ = stdout_task.await;
     result
 }

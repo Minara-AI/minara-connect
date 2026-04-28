@@ -103,6 +103,9 @@ async fn run_session(
     let pubkey_string = identity.pubkey_string();
     let secret_key = SecretKey::from_bytes(&identity.seed_bytes());
 
+    // 2.5. User's self-declared nick (best-effort; missing config = no nick).
+    let self_nick = load_self_nick();
+
     // 3. Endpoint with MemoryLookup pre-populated with the bootstrap peers.
     let memory_lookup = MemoryLookup::new();
     for peer in &bootstrap_peers {
@@ -280,7 +283,13 @@ async fn run_session(
                     .await;
                 continue;
             }
-            let nick_short: String = msg.author.chars().take(8).collect();
+            // Prefer the sender's self-declared nick (v0.2 field) over the
+            // pubkey-prefix fallback. Receivers see the same name across
+            // peers as the sender intended.
+            let nick_short: String = match msg.nick.as_deref() {
+                Some(n) if !n.is_empty() => n.to_string(),
+                _ => msg.author.chars().take(8).collect(),
+            };
             let body: String = if msg.kind == cc_connect_core::message::KIND_FILE_DROP {
                 format!("dropped {}", msg.body)
             } else {
@@ -306,6 +315,9 @@ async fn run_session(
         let msg = if let Some(path_str) = body.strip_prefix("/drop ") {
             match build_file_drop(&store, path_str.trim(), &pubkey_string, &topic_id_hex).await {
                 Ok(m) => {
+                    let m = m
+                        .with_nick(self_nick.clone())
+                        .context("attach nick to file_drop")?;
                     let _ = display_tx
                         .send(DisplayLine::Echo(format!(
                             "[chat] dropped {} ({} bytes)",
@@ -331,8 +343,20 @@ async fn run_session(
                 .await;
             continue;
         } else {
+            // Echo our own chat line into the scrollback so the user sees what
+            // they sent (the listener filters out msg.author == our_pubkey to
+            // avoid duplicate gossip echoes — that's the correct dedup, but it
+            // also hides our own send, which is wrong UX).
+            let echo_nick = self_nick
+                .clone()
+                .unwrap_or_else(|| pubkey_string.chars().take(8).collect::<String>());
+            let _ = display_tx
+                .send(DisplayLine::Echo(format!("[{echo_nick}] {body}")))
+                .await;
             Message::new(&new_ulid(), pubkey_string.clone(), now_ms(), body)
                 .context("build Message")?
+                .with_nick(self_nick.clone())
+                .context("attach nick to chat")?
         };
 
         if let Err(e) = log_io::append(&mut send_log, &msg) {
@@ -387,6 +411,19 @@ fn rooms_dir(topic_id_hex: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"));
     home.join(".cc-connect").join("rooms").join(topic_id_hex)
+}
+
+/// Best-effort load of `self_nick` from `~/.cc-connect/config.json`. Any
+/// missing/malformed config returns `None` (falls back to pubkey prefix).
+fn load_self_nick() -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let path = home.join(".cc-connect").join("config.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("self_nick")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 async fn build_file_drop(

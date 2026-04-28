@@ -64,7 +64,7 @@ fn format_line(
     rooms_base: &Path,
     multi_room: bool,
 ) -> String {
-    let nick = nick_for(nicknames, &msg.author);
+    let nick = nick_for(nicknames, msg);
     let time = format_utc_hhmm(msg.ts);
     let prefix = if multi_room {
         let tag = topic.chars().take(6).collect::<String>().to_ascii_lowercase();
@@ -89,13 +89,19 @@ fn format_line(
     }
 }
 
-/// Look up the author's nickname; fall back to the first 8 chars of the
-/// Pubkey. The result is sanitised per PROTOCOL §7.3 step 5.
-fn nick_for(nicknames: &HashMap<String, String>, author: &str) -> String {
-    let raw = nicknames
-        .get(author)
-        .map(|s| s.as_str())
-        .unwrap_or_else(|| pubkey_prefix(author));
+/// Pick a display name for a Message. Precedence:
+///   1. Sender's self-declared `msg.nick` (v0.2 field — set by the sender
+///      via the wizard or `~/.cc-connect/config.json`).
+///   2. The receiver's local `nicknames.json` mapping for `msg.author`.
+///   3. The first 8 chars of `msg.author` (Pubkey prefix).
+///
+/// Result is sanitised per PROTOCOL §7.3 step 5.
+fn nick_for(nicknames: &HashMap<String, String>, msg: &Message) -> String {
+    let raw = msg
+        .nick
+        .as_deref()
+        .or_else(|| nicknames.get(&msg.author).map(|s| s.as_str()))
+        .unwrap_or_else(|| pubkey_prefix(&msg.author));
     sanitize_nick(raw)
 }
 
