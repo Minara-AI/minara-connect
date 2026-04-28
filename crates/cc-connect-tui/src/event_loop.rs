@@ -221,7 +221,7 @@ fn draw(f: &mut Frame, app: &App) {
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let label = format!(" cc-connect · room {} ", app.topic_short);
-    let hint = " [F2 / Tab] switch pane   [Ctrl-Y] reprint ticket   [Ctrl-Q] quit ";
+    let hint = " [F2 / Tab] switch pane   [Ctrl-Y] copy ticket   [Ctrl-Q] quit ";
     let line = Line::from(vec![
         Span::styled(label, theme::header_chip()),
         Span::styled(hint, theme::header_hint()),
@@ -247,14 +247,27 @@ async fn handle_key(
                 return;
             }
             KeyCode::Char('y') => {
-                // Re-print the ticket as a chat scrollback line so the user
-                // can find + copy it without scrolling all the way up.
-                let ticket = app.ticket.clone();
-                app.push_chat(
-                    ChatLineKind::System,
-                    "Share this ticket to invite peers:".to_string(),
-                );
-                app.push_chat(ChatLineKind::Marker, ticket);
+                // Copy the ticket to the system clipboard. Fall back to
+                // re-printing it in scrollback if the clipboard is unreachable
+                // (headless Linux, locked-down macOS sandbox, etc.).
+                match arboard::Clipboard::new()
+                    .and_then(|mut c| c.set_text(app.ticket.clone()))
+                {
+                    Ok(()) => {
+                        app.push_chat(
+                            ChatLineKind::System,
+                            "✓ ticket copied to clipboard".to_string(),
+                        );
+                    }
+                    Err(e) => {
+                        app.push_chat(
+                            ChatLineKind::Warn,
+                            format!("clipboard unreachable ({e}); reprinting ticket below"),
+                        );
+                        let ticket = app.ticket.clone();
+                        app.push_chat(ChatLineKind::Marker, ticket);
+                    }
+                }
                 return;
             }
             KeyCode::Char('c') if app.focus == Focus::Chat => {
