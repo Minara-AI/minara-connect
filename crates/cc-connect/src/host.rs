@@ -64,7 +64,14 @@ async fn run_async(no_relay: bool, relay: Option<&str>) -> Result<()> {
         endpoint.online().await;
     }
 
-    // Step 6: assemble and encode the ticket.
+    // Step 6: subscribe to our own topic so joiners have someone to bootstrap
+    // off. Use `subscribe` (not `subscribe_and_join`) since we have no
+    // bootstrap peers ourselves and shouldn't block waiting for one.
+    // Without this, joiners' `subscribe_and_join` hangs because no member of
+    // the topic ever ack's them.
+    let _topic_handle = gossip.subscribe(topic, vec![]).await?;
+
+    // Step 7: assemble and encode the ticket.
     let our_addr = endpoint.addr();
     let payload = TicketPayload {
         topic,
@@ -82,11 +89,12 @@ async fn run_async(no_relay: bool, relay: Option<&str>) -> Result<()> {
     println!();
     println!("Press Ctrl-C to close the room (joiners will be disconnected).");
 
-    // Step 7: stay online so joiners can dial us. Drop guards on Ctrl-C.
+    // Step 8: stay online so joiners can dial us. Drop guards on Ctrl-C.
     tokio::signal::ctrl_c()
         .await
         .context("install Ctrl-C handler")?;
     println!("\nclosing room…");
+    drop(_topic_handle);
     drop(gossip);
     Ok(())
 }
