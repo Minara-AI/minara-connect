@@ -10,6 +10,7 @@ pub mod chat;
 pub mod chat_session;
 pub mod doctor;
 pub mod host;
+pub mod host_bg;
 pub mod ticket_payload;
 
 use anyhow::Result;
@@ -54,8 +55,43 @@ pub enum Command {
         #[arg(long, value_name = "URL")]
         relay: Option<String>,
     },
+    /// Run, manage, and inspect persistent host daemons.
+    ///
+    /// A host daemon owns a Room's topic + identity in the background,
+    /// surviving the TUI / chat process that started it. The TUI uses this
+    /// to keep a Room joinable after the user closes the window.
+    HostBg {
+        #[command(subcommand)]
+        cmd: HostBgCmd,
+    },
+    /// Internal: daemon entry point invoked by `host-bg start`. Don't run
+    /// directly — the parent `host-bg start` does the spawn-with-setsid
+    /// dance and reads the READY line before exiting.
+    #[command(hide = true)]
+    HostBgDaemon {
+        #[arg(long, value_name = "URL")]
+        relay: Option<String>,
+    },
     /// Sanity-check the cc-connect installation.
     Doctor,
+}
+
+#[derive(Subcommand)]
+pub enum HostBgCmd {
+    /// Start a new background-host daemon. Prints the Ticket on stdout
+    /// then exits, leaving the daemon running detached.
+    Start {
+        /// Use this self-hosted iroh-relay (HTTPS URL).
+        #[arg(long, value_name = "URL")]
+        relay: Option<String>,
+    },
+    /// SIGTERM a running daemon by topic hex (prefix-match accepted).
+    Stop {
+        /// Topic hex (full 64 chars or any unique prefix).
+        topic: String,
+    },
+    /// List all running daemons (one line per daemon).
+    List,
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -64,6 +100,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Chat { ticket, no_relay, relay } => {
             chat::run(&ticket, no_relay, relay.as_deref())
         }
+        Command::HostBg { cmd } => match cmd {
+            HostBgCmd::Start { relay } => host_bg::run_start(relay.as_deref()),
+            HostBgCmd::Stop { topic } => host_bg::run_stop(&topic),
+            HostBgCmd::List => host_bg::run_list(),
+        },
+        Command::HostBgDaemon { relay } => host_bg::run_daemon(relay.as_deref()),
         Command::Doctor => doctor::run(),
     }
 }
