@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::chat::fetch_and_export_blob;
+use crate::chat_session::fetch_and_export_blob;
 
 /// ALPN identifying the cc-connect Backfill protocol. Must be byte-exact.
 pub const BACKFILL_ALPN: &[u8] = b"cc-connect/v1/backfill";

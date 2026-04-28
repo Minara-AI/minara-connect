@@ -30,11 +30,19 @@ fn run() -> Result<()> {
         }
     };
 
-    // Step 2-3: enumerate active rooms (live PIDs only).
+    // Step 2-3: enumerate active rooms (live PIDs only). If
+    // `CC_CONNECT_ROOM` is set in the hook's environment, scope to that one
+    // topic — used by the TUI/room orchestrator to bind a specific Claude
+    // Code session to a specific room. Standalone Claude Code (no env var)
+    // keeps the legacy "inject every active room" behaviour.
     let active_rooms_dir = active_rooms_dir()?;
-    let topic_ids = enumerate_active_rooms(&active_rooms_dir)?;
+    let mut topic_ids = enumerate_active_rooms(&active_rooms_dir)?;
+    if let Ok(forced) = std::env::var("CC_CONNECT_ROOM") {
+        topic_ids.retain(|t| t == &forced);
+    }
     if topic_ids.is_empty() {
-        // No active rooms → empty stdout, exit 0. Canonical "no new Messages".
+        // No (matching) active rooms → empty stdout, exit 0. Canonical
+        // "no new Messages".
         return Ok(());
     }
 

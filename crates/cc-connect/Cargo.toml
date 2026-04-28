@@ -7,6 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "cc-connect host/chat/doctor — multi-Claude shared-substrate client."
 
+[lib]
+name = "cc_connect"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cc-connect"
 path = "src/main.rs"

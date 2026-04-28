@@ -181,6 +181,110 @@ fn magic_moment_hook_skips_dead_pid_active_room_file() {
     );
 }
 
+/// CC_CONNECT_ROOM env routing: with two active rooms planted, the hook
+/// must inject ONLY the room whose topic matches the env var, and use the
+/// single-room prefix shape (no `<topic_short>` tag).
+#[test]
+fn routing_with_env_var_scopes_to_one_room() {
+    const TOPIC_A: &str =
+        "1111111111111111111111111111111111111111111111111111111111111111";
+    const TOPIC_B: &str =
+        "2222222222222222222222222222222222222222222222222222222222222222";
+    const ID_A: &str = "01HZA8K9F0RS3JXG7QZ4N5VTBA";
+    const ID_B: &str = "01HZA8K9F0RS3JXG7QZ4N5VTBB";
+    const BODY_A: &str = "from-room-A";
+    const BODY_B: &str = "from-room-B";
+
+    let env = TestEnv::setup_no_room();
+    env.seed_active_room(TOPIC_A, ID_A, BODY_A);
+    env.seed_active_room(TOPIC_B, ID_B, BODY_B);
+
+    let stdin_payload = format!(r#"{{"session_id":"{TEST_SESSION}"}}"#);
+    let out = Command::new(&env.hook_bin)
+        .env_clear()
+        .env("HOME", &env.home)
+        .env("TMPDIR", &env.tmpdir)
+        .env("CC_CONNECT_ROOM", TOPIC_A)
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(stdin_payload.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook child");
+
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    let expected = format!(
+        "[chatroom @{} 00:00Z] {}\n",
+        &TEST_PUBKEY[..8],
+        BODY_A
+    );
+    assert_eq!(
+        stdout, expected,
+        "CC_CONNECT_ROOM MUST scope to exactly one room and use the single-room prefix"
+    );
+    assert!(
+        !stdout.contains(BODY_B),
+        "non-matching room MUST NOT appear in output"
+    );
+}
+
+/// Without `CC_CONNECT_ROOM` set, the hook keeps the legacy "inject all
+/// active rooms" behaviour for back-compat with standalone Claude Code.
+#[test]
+fn routing_without_env_var_includes_all_rooms() {
+    const TOPIC_A: &str =
+        "3333333333333333333333333333333333333333333333333333333333333333";
+    const TOPIC_B: &str =
+        "4444444444444444444444444444444444444444444444444444444444444444";
+    const ID_A: &str = "01HZA8K9F0RS3JXG7QZ4N5VTAA";
+    const ID_B: &str = "01HZA8K9F0RS3JXG7QZ4N5VTAB";
+    const BODY_A: &str = "alpha-room-msg";
+    const BODY_B: &str = "beta-room-msg";
+
+    let env = TestEnv::setup_no_room();
+    env.seed_active_room(TOPIC_A, ID_A, BODY_A);
+    env.seed_active_room(TOPIC_B, ID_B, BODY_B);
+
+    let stdin_payload = format!(r#"{{"session_id":"{TEST_SESSION}"}}"#);
+    let out = Command::new(&env.hook_bin)
+        .env_clear()
+        .env("HOME", &env.home)
+        .env("TMPDIR", &env.tmpdir)
+        // No CC_CONNECT_ROOM — legacy mode.
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin
+                .as_mut()
+                .unwrap()
+                .write_all(stdin_payload.as_bytes())?;
+            c.wait_with_output()
+        })
+        .expect("hook child");
+
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(
+        stdout.contains(BODY_A),
+        "legacy mode MUST include room A; stdout was {stdout:?}"
+    );
+    assert!(
+        stdout.contains(BODY_B),
+        "legacy mode MUST include room B; stdout was {stdout:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test fixture: tempdir-backed HOME + TMPDIR plus a built cc-connect-hook bin.
 // ---------------------------------------------------------------------------
@@ -250,28 +354,33 @@ impl TestEnv {
     /// Plant: an active-rooms PID file pointing at this test process (so it's
     /// detected as alive); a log.jsonl with one Message; no cursor yet.
     fn seed_active_room_with_unread_message(&self) {
-        // 1. log.jsonl
+        self.seed_active_room(TEST_TOPIC_HEX, TEST_MSG_ID, TEST_BODY);
+    }
+
+    /// Same as [`seed_active_room_with_unread_message`] but with caller-
+    /// supplied topic / message id / body, used for the multi-room routing
+    /// tests.
+    fn seed_active_room(&self, topic_hex: &str, msg_id: &str, body: &str) {
         let log_path = self
             .home
             .join(".cc-connect")
             .join("rooms")
-            .join(TEST_TOPIC_HEX)
+            .join(topic_hex)
             .join("log.jsonl");
         let mut log_file = log_io::open_or_create_log(&log_path).expect("open log");
         let msg = Message::new(
-            TEST_MSG_ID,
+            msg_id,
             TEST_PUBKEY.to_string(),
             TEST_TS_MS,
-            TEST_BODY.to_string(),
+            body.to_string(),
         )
         .expect("valid Message");
         log_io::append(&mut log_file, &msg).expect("append");
 
-        // 2. active-rooms PID file → us, so kill(pid, 0) succeeds.
         let active_dir = self.active_rooms_dir();
         std::fs::create_dir_all(&active_dir).unwrap();
         std::fs::set_permissions(&active_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let pid_path = active_dir.join(format!("{TEST_TOPIC_HEX}.active"));
+        let pid_path = active_dir.join(format!("{topic_hex}.active"));
         std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
     }
 }
