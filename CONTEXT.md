@@ -29,7 +29,7 @@ The Peer that creates a Room (originates the Ticket). Has no special privilege a
 _Avoid_: owner, admin, server.
 
 **Identity**:
-A keypair representing one machine, used to sign Messages.
+A keypair representing one machine. v0.1 uses it to authenticate the iroh transport (the Pubkey is the iroh NodeId); v0.2+ also signs each Message with it.
 _Avoid_: account, login, user.
 
 **Pubkey**:
