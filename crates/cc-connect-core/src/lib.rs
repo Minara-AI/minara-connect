@@ -4,4 +4,5 @@
 //! specification this crate implements.
 
 pub mod identity;
+pub mod message;
 pub mod ticket;

@@ -410,13 +410,13 @@ body    = use postgres                    (12 bytes UTF-8, no escapes needed)
 {"v":1,"id":"01HZA8K9F0RS3JXG7QZ4N5VTBC","author":"hnvcppgow2sc2yvdvdicu3ynonsteflxdxrehjr2ybekdc2z3iuq","ts":1714323456789,"body":"use postgres"}
 ```
 
-Length: 162 bytes. Field order **MUST** match the canonical form exactly when emitting. Decoders **MUST NOT** require this ordering on input.
+Length: 146 bytes (verified by `cc-connect-core::message::tests::protocol_11_2_canonical_encoding_byte_exact`). Field order **MUST** match the canonical form exactly when emitting. Decoders **MUST NOT** require this ordering on input.
 
-**Edge-case body vector:** with `body = "<é>\n\"x"` (literal: `<`, `é` as 0xc3 0xa9, `>`, raw newline 0x0a, `"`, `x` — 7 input bytes UTF-8), the canonical encoding of `body` is:
+**Edge-case body vector:** with `body = "<é>\n\"x"` (literal: `<`, `é` as 0xc3 0xa9, `>`, raw newline 0x0a, `"`, `x` — 7 input bytes UTF-8), the canonical encoding of the `body` JSON string value (just the `"…"` field value, not including `"body":`) is:
 ```
 "<é>\n\"x"
 ```
-That is: `<` and `>` pass through unescaped, `é` is emitted as its raw UTF-8 bytes (`0xc3 0xa9`), the newline is escaped as `\n` (two ASCII bytes), and the embedded quote is escaped as `\"`. No `\u` escapes for code points ≥ 0x20. Total `body` field bytes including the surrounding quotes: 12.
+That is: `<` and `>` pass through unescaped, `é` is emitted as its raw UTF-8 bytes (`0xc3 0xa9`), the newline is escaped as `\n` (two ASCII bytes), and the embedded quote is escaped as `\"`. No `\u` escapes for code points ≥ 0x20. Total bytes (including the surrounding quotes): **11**.
 
 ### 11.3 Backfill request wire bytes
 
