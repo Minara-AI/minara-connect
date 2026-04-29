@@ -240,7 +240,15 @@ fn exec_zellij(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
     let layout_path = write_tmp_layout(&format!("cc-connect-{tab_name}"), "kdl", &layout_kdl)?;
 
     let inside_zellij = std::env::var_os("ZELLIJ").is_some();
-    let session_running = zellij_session_running(ZELLIJ_SESSION);
+    let session_state = zellij_session_state(ZELLIJ_SESSION);
+
+    // EXITED stays in `list-sessions` until manually deleted; trying to
+    // `action new-tab` against it fails with "There is no active
+    // session!". Wipe it so the fresh-session path can recreate cleanly.
+    if matches!(session_state, ZellijSessionState::Exited) {
+        zellij_delete_session(ZELLIJ_SESSION);
+    }
+    let session_running = matches!(session_state, ZellijSessionState::Live);
 
     print_exit_hint();
 
@@ -255,24 +263,31 @@ fn exec_zellij(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
             .status()
             .context("spawn zellij action new-tab")?;
         if !status.success() {
-            return Err(anyhow!(
-                "zellij action new-tab returned exit {:?}",
+            // Race: session was killed (or had transitioned to EXITED in
+            // the gap between our check and `action new-tab`). Wipe it
+            // and fall through to the fresh-session path.
+            eprintln!(
+                "[room] zellij action new-tab failed (exit {:?}) — \
+                 cleaning up dead session and starting fresh",
                 status.code()
-            ));
+            );
+            zellij_delete_session(ZELLIJ_SESSION);
+        } else {
+            if inside_zellij {
+                // We're already inside zellij — assume it's the
+                // cc-connect session and the new tab is now visible.
+                // If the user happens to be in a different zellij
+                // session, they can `zellij attach cc-connect` themselves.
+                return Ok(());
+            }
+            let err = Command::new("zellij")
+                .arg("attach")
+                .arg(ZELLIJ_SESSION)
+                .exec();
+            return Err(anyhow!("exec zellij attach failed: {err}"));
         }
-        if inside_zellij {
-            // We're already inside zellij — assume it's the cc-connect
-            // session and the new tab is now visible. Just return; if
-            // the user happens to be in a different zellij session,
-            // they can `zellij attach cc-connect` themselves.
-            return Ok(());
-        }
-        let err = Command::new("zellij")
-            .arg("attach")
-            .arg(ZELLIJ_SESSION)
-            .exec();
-        Err(anyhow!("exec zellij attach failed: {err}"))
-    } else {
+    }
+    {
         // Fresh session — `-n PATH` forces "create new session with this
         // layout" regardless of any other -session arg semantics.
         let mut cmd = Command::new("zellij");
@@ -302,21 +317,50 @@ fn exec_tmux(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
     Err(anyhow!("exec tmux launcher failed: {err}"))
 }
 
-/// True iff `zellij list-sessions` reports a running session named
-/// `name`. Returns false on any error (zellij not installed, no
-/// sessions running, etc.) — caller treats that as "no session".
-fn zellij_session_running(name: &str) -> bool {
+/// State of a named zellij session as reported by `list-sessions`. The
+/// `Exited` arm matters because Ctrl-q'd sessions stay in the list as
+/// "(EXITED - attach to resurrect)" — treating them as `Live` makes
+/// `action new-tab` fail with "There is no active session!".
+#[derive(Debug, Clone, Copy)]
+enum ZellijSessionState {
+    Live,
+    Exited,
+    Absent,
+}
+
+fn zellij_session_state(name: &str) -> ZellijSessionState {
     let out = Command::new("zellij")
         .args(["list-sessions", "--no-formatting"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output();
-    match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .any(|l| l.split_whitespace().next() == Some(name)),
-        Err(_) => false,
+    let Ok(o) = out else {
+        return ZellijSessionState::Absent;
+    };
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.split_whitespace().next() != Some(name) {
+            continue;
+        }
+        if trimmed.contains("EXITED") {
+            return ZellijSessionState::Exited;
+        }
+        return ZellijSessionState::Live;
     }
+    ZellijSessionState::Absent
+}
+
+/// Best-effort `zellij delete-session NAME`. Used to clear out an
+/// EXITED session before creating a fresh one with the same name —
+/// otherwise zellij errors with "There is no active session!" when we
+/// try to attach.
+fn zellij_delete_session(name: &str) {
+    let _ = Command::new("zellij")
+        .args(["delete-session", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Hint printed to stderr just before exec'ing the multiplexer, so the
