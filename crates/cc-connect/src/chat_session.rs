@@ -224,15 +224,15 @@ async fn run_session(
     // 8.5. IPC unix-socket server. Lets cc-connect-mcp (and any other
     //      local helper) drive this session — sending chat lines on
     //      Claude Code's behalf, querying recent log, etc.
-    let ipc_socket_path = ipc_socket_path(&topic_id_hex)?;
-    let _ipc_guard = IpcSocketGuard::new(&ipc_socket_path);
-    let ipc_listener = match tokio::net::UnixListener::bind(&ipc_socket_path) {
+    let (ipc_sock, ipc_marker) = ipc_socket_path(&topic_id_hex)?;
+    let _ipc_guard = IpcSocketGuard::new(&ipc_sock, &ipc_marker);
+    let ipc_listener = match tokio::net::UnixListener::bind(&ipc_sock) {
         Ok(l) => Some(l),
         Err(e) => {
             let _ = display_tx
                 .send(DisplayLine::Warn(format!(
                     "[chat] IPC socket bind failed ({}): {e}",
-                    ipc_socket_path.display()
+                    ipc_sock.display()
                 )))
                 .await;
             None
@@ -240,7 +240,7 @@ async fn run_session(
     };
     let ipc_handle = if let Some(listener) = ipc_listener {
         let _ = std::fs::set_permissions(
-            &ipc_socket_path,
+            &ipc_sock,
             std::fs::Permissions::from_mode(0o600),
         );
         let ipc_input_tx = ipc_input_tx.clone();
@@ -700,35 +700,65 @@ fn now_ms() -> i64 {
 
 // ---------- IPC unix-socket server -----------------------------------------
 
-fn ipc_socket_path(topic_id_hex: &str) -> Result<PathBuf> {
+/// Pick an IPC socket path + write the marker file pointing at it.
+///
+/// Unix-domain sockets on macOS are capped at 104 bytes (SUN_LEN). A
+/// straight `$TMPDIR/cc-connect-$UID/sockets/<64-hex>.sock` path blows
+/// past that on macOS where `$TMPDIR` is `/var/folders/...`. So we put
+/// the actual socket under `/tmp` with an 8-hex random tag (~24 byte
+/// path) and store the absolute path in a marker file under HOME so
+/// cc-connect-mcp can find it.
+fn ipc_socket_path(topic_id_hex: &str) -> Result<(PathBuf, PathBuf)> {
     let uid = rustix::process::geteuid().as_raw();
-    let dir = std::env::temp_dir()
-        .join(format!("cc-connect-{uid}"))
-        .join("sockets");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create_dir_all {}", dir.display()))?;
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    let path = dir.join(format!("{topic_id_hex}.sock"));
-    let _ = std::fs::remove_file(&path); // sweep stale
-    Ok(path)
+    let mut rand_buf = [0u8; 4];
+    getrandom::getrandom(&mut rand_buf)
+        .map_err(|e| anyhow!("OS rng for socket suffix: {e}"))?;
+    let mut rand_hex = String::with_capacity(8);
+    for b in rand_buf {
+        use std::fmt::Write as _;
+        let _ = write!(rand_hex, "{b:02x}");
+    }
+    let socket_path = PathBuf::from(format!("/tmp/cc-{uid}-{rand_hex}.sock"));
+    let _ = std::fs::remove_file(&socket_path);
+
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("HOME not set"))?;
+    let marker = home
+        .join(".cc-connect")
+        .join("rooms")
+        .join(topic_id_hex)
+        .join("chat.sock");
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create_dir_all {}", parent.display()))?;
+    }
+    std::fs::write(&marker, socket_path.display().to_string())
+        .with_context(|| format!("write {}", marker.display()))?;
+    let _ = std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600));
+    Ok((socket_path, marker))
 }
 
-/// Removes the unix socket file on Drop so the next chat session can rebind.
+/// Removes both the unix socket file and the HOME-side marker pointing at
+/// it on Drop so the next chat session can rebind cleanly.
 struct IpcSocketGuard {
-    path: PathBuf,
+    socket_path: PathBuf,
+    marker_path: PathBuf,
 }
 
 impl IpcSocketGuard {
-    fn new(path: &Path) -> Self {
+    fn new(socket_path: &Path, marker_path: &Path) -> Self {
         Self {
-            path: path.to_path_buf(),
+            socket_path: socket_path.to_path_buf(),
+            marker_path: marker_path.to_path_buf(),
         }
     }
 }
 
 impl Drop for IpcSocketGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.marker_path);
     }
 }
 

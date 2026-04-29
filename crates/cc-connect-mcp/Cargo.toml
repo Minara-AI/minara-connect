@@ -16,4 +16,3 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "io-std", "net"] }
-rustix.workspace = true

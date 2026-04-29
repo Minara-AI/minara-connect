@@ -485,7 +485,6 @@ name = "cc-connect-mcp"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "rustix",
  "serde",
  "serde_json",
  "tokio",

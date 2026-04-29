@@ -279,16 +279,32 @@ async fn ipc_call(payload: Value) -> Result<Value> {
 }
 
 fn ipc_socket_path() -> Result<PathBuf> {
-    let topic = std::env::var("CC_CONNECT_ROOM")
-        .map_err(|_| anyhow!("CC_CONNECT_ROOM env var not set — Claude Code wasn't launched by `cc-connect-tui`"))?;
+    let topic = std::env::var("CC_CONNECT_ROOM").map_err(|_| {
+        anyhow!("CC_CONNECT_ROOM env var not set — Claude Code wasn't launched by `cc-connect-tui`")
+    })?;
     if topic.is_empty() {
         bail!("CC_CONNECT_ROOM is empty");
     }
-    let uid = rustix::process::geteuid().as_raw();
-    Ok(std::env::temp_dir()
-        .join(format!("cc-connect-{uid}"))
-        .join("sockets")
-        .join(format!("{topic}.sock")))
+    // chat_session writes the absolute socket path to a HOME-side marker
+    // (because the actual socket lives under /tmp to stay within the macOS
+    // SUN_LEN limit, but the room's HOME is where each peer's state lives).
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("HOME not set"))?;
+    let marker = home
+        .join(".cc-connect")
+        .join("rooms")
+        .join(&topic)
+        .join("chat.sock");
+    if !marker.exists() {
+        bail!(
+            "no active cc-connect room (marker {} missing — is `cc-connect chat` / `cc-connect-tui` running for topic {topic}?)",
+            marker.display()
+        );
+    }
+    let raw = std::fs::read_to_string(&marker)
+        .with_context(|| format!("read {}", marker.display()))?;
+    Ok(PathBuf::from(raw.trim()))
 }
 
 // ---- JSON-RPC envelope helpers ---------------------------------------------
