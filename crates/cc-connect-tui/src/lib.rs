@@ -9,6 +9,7 @@ pub mod app;
 pub mod chat_pane;
 pub mod claude_pane;
 pub mod event_loop;
+pub mod mention;
 pub mod setup;
 pub mod tabs;
 pub mod theme;

@@ -208,6 +208,10 @@ fn apply_display_line(app: &mut App, tid: TabId, line: DisplayLine) {
                 ChatLineKind::Incoming
             };
             let prefix = if mentions_me { "(@me) " } else { "" };
+            // Record the sender so the @-completion popup has it on tap.
+            if let Some(t) = app.tabs.get_mut(tid) {
+                t.record_nick(&nick_short);
+            }
             ChatLine {
                 kind,
                 text: format!("{prefix}[{nick_short}] {body}"),
@@ -332,23 +336,82 @@ async fn handle_chat_key(app: &mut App, key: KeyEvent) {
         Some(id) => id,
         None => return,
     };
+    let self_nick = app.self_nick.clone();
     let tab = match app.tabs.get_mut(active_id) {
         Some(t) => t,
         None => return,
     };
+
+    // Decide whether the @-completion popup is currently displayed.
+    // Recompute every keystroke based on input_buf state; cheap and means
+    // we never have to track open/close transitions.
+    let popup_visible = !tab.mention_dismissed
+        && crate::mention::current_at_token(&tab.input_buf)
+            .map(|p| {
+                !crate::mention::mention_candidates(
+                    &tab.recent_nicks,
+                    p,
+                    self_nick.as_deref(),
+                )
+                .is_empty()
+            })
+            .unwrap_or(false);
+
+    if popup_visible {
+        // Refresh the candidate list now so we can dispatch on indexes.
+        let token = crate::mention::current_at_token(&tab.input_buf).unwrap_or("");
+        let candidates =
+            crate::mention::mention_candidates(&tab.recent_nicks, token, self_nick.as_deref());
+        let n = candidates.len();
+        match key.code {
+            KeyCode::Up => {
+                tab.mention_idx = if tab.mention_idx == 0 {
+                    n.saturating_sub(1)
+                } else {
+                    tab.mention_idx - 1
+                };
+                return;
+            }
+            KeyCode::Down => {
+                tab.mention_idx = (tab.mention_idx + 1) % n.max(1);
+                return;
+            }
+            KeyCode::Tab | KeyCode::Enter => {
+                let pick = candidates.get(tab.mention_idx).cloned();
+                if let Some(nick) = pick {
+                    crate::mention::complete_at(&mut tab.input_buf, &nick);
+                    tab.mention_idx = 0;
+                }
+                return;
+            }
+            KeyCode::Esc => {
+                tab.mention_dismissed = true;
+                tab.mention_idx = 0;
+                return;
+            }
+            _ => {} // fall through to normal editing
+        }
+    }
+
     match key.code {
         KeyCode::Enter => {
             if !tab.input_buf.is_empty() {
                 let line = std::mem::take(&mut tab.input_buf);
+                tab.mention_idx = 0;
+                tab.mention_dismissed = false;
                 let _ = tab.chat_handle.input_tx.send(line).await;
             }
         }
         KeyCode::Backspace => {
             tab.input_buf.pop();
+            tab.mention_idx = 0;
+            tab.mention_dismissed = false;
         }
         KeyCode::Char(c) => {
             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                 tab.input_buf.push(c);
+                tab.mention_idx = 0;
+                tab.mention_dismissed = false;
             }
         }
         _ => {}
@@ -505,7 +568,13 @@ fn draw(f: &mut Frame, app: &App) {
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(chunks[2]);
         claude_pane::render(f, panes[0], active, app.focus == Focus::Claude);
-        chat_pane::render(f, panes[1], active, app.focus == Focus::Chat);
+        chat_pane::render(
+            f,
+            panes[1],
+            active,
+            app.focus == Focus::Chat,
+            app.self_nick.as_deref(),
+        );
     } else {
         let placeholder = Paragraph::new("No active tabs. Ctrl-N to open one, Ctrl-Q to quit.");
         f.render_widget(placeholder, chunks[2]);

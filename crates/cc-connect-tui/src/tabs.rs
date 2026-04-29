@@ -53,12 +53,23 @@ pub struct RoomTab {
     /// Per-tab textbox.
     pub input_buf: String,
 
+    /// Distinct peer nicks we've seen on this tab, most-recent-first.
+    /// Drives the @-mention completion popup.
+    pub recent_nicks: VecDeque<String>,
+    /// Currently-selected entry index in the filtered mention list.
+    /// Reset to 0 every time the input buffer mutates.
+    pub mention_idx: usize,
+    /// User pressed Esc on the popup. Suppresses display until the
+    /// in-progress @-token changes (typing or backspace).
+    pub mention_dismissed: bool,
+
     /// Background tasks we own (forwarders + pty reader). Aborted on drop.
     forwarder_tasks: Vec<JoinHandle<()>>,
     pty_reader_task: Option<JoinHandle<()>>,
 }
 
 const CHAT_SCROLLBACK_CAP: usize = 1024;
+const RECENT_NICKS_CAP: usize = 32;
 
 impl RoomTab {
     pub fn push_chat(&mut self, line: ChatLine) {
@@ -66,6 +77,22 @@ impl RoomTab {
             self.chat_lines.pop_front();
         }
         self.chat_lines.push_back(line);
+    }
+
+    /// Record a nick we just saw from a peer. Most-recent-first, deduped,
+    /// capped at [`RECENT_NICKS_CAP`]. Drives the @-mention popup.
+    pub fn record_nick(&mut self, nick: &str) {
+        let trimmed = nick.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Some(pos) = self.recent_nicks.iter().position(|n| n == trimmed) {
+            self.recent_nicks.remove(pos);
+        }
+        self.recent_nicks.push_front(trimmed.to_string());
+        while self.recent_nicks.len() > RECENT_NICKS_CAP {
+            self.recent_nicks.pop_back();
+        }
     }
 
     pub fn topic_short(&self) -> String {
@@ -198,6 +225,9 @@ pub async fn spawn_tab(id: TabId, args: SpawnTabArgs, io: &TabIo) -> Result<Room
         vt_parser: vt100::Parser::new(args.initial_pty_size.rows, args.initial_pty_size.cols, 0),
         chat_lines: VecDeque::new(),
         input_buf: String::new(),
+        recent_nicks: VecDeque::new(),
+        mention_idx: 0,
+        mention_dismissed: false,
         forwarder_tasks: vec![display_forwarder],
         pty_reader_task: Some(pty_reader_task),
     })

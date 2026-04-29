@@ -3,16 +3,24 @@
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
 use crate::app::ChatLineKind;
+use crate::mention;
 use crate::tabs::RoomTab;
 use crate::theme;
 
-pub fn render(frame: &mut Frame, area: Rect, tab: &RoomTab, focused: bool) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    tab: &RoomTab,
+    focused: bool,
+    self_nick: Option<&str>,
+) {
     let border_style = if focused {
         theme::border_focused()
     } else {
@@ -57,6 +65,67 @@ pub fn render(frame: &mut Frame, area: Rect, tab: &RoomTab, focused: bool) {
         Span::styled(tab.input_buf.as_str(), theme::input_text()),
     ]));
     frame.render_widget(input, chunks[1]);
+
+    // @-mention completion popup. Floats just above the input line, only
+    // when the chat pane is focused, the user has an in-progress @-token,
+    // they haven't pressed Esc to dismiss, and we have at least one match.
+    if focused && !tab.mention_dismissed {
+        if let Some(prefix) = mention::current_at_token(&tab.input_buf) {
+            let candidates =
+                mention::mention_candidates(&tab.recent_nicks, prefix, self_nick);
+            if !candidates.is_empty() {
+                render_mention_popup(frame, chunks[1], &candidates, tab.mention_idx);
+            }
+        }
+    }
+}
+
+/// Tiny floating list anchored on top of the input line. Sized to fit
+/// up to 5 entries; if there are more, the rest are hidden (the user
+/// keeps typing to filter).
+fn render_mention_popup(frame: &mut Frame, input_area: Rect, candidates: &[String], idx: usize) {
+    const MAX_ROWS: u16 = 5;
+    let visible_n = candidates.len().min(MAX_ROWS as usize);
+    let height = (visible_n as u16) + 2; // +2 for top/bottom border
+    // Width: longest candidate + 4 (border + padding + ↩ marker).
+    let widest = candidates
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0);
+    let width = ((widest + 4) as u16).clamp(12, input_area.width);
+
+    // Anchor flush left, just above the input line.
+    let y = input_area.y.saturating_sub(height);
+    let x = input_area.x;
+    let popup = Rect::new(x, y, width, height);
+
+    let items: Vec<ListItem> = candidates
+        .iter()
+        .take(MAX_ROWS as usize)
+        .enumerate()
+        .map(|(i, c)| {
+            let style = if i == idx {
+                Style::default()
+                    .add_modifier(Modifier::REVERSED)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(format!("@{c}")).style(style)
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(theme::BORDER_TYPE)
+        .title(Span::styled(
+            " mention · ↑↓ Tab/⏎ Esc ",
+            theme::pane_title(),
+        ));
+    let list = List::new(items).block(block);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
 }
 
 /// "[<nick>] <body>" → distinct nick / body styles. When `mention` is true,
