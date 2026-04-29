@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod host;
 pub mod host_bg;
 pub mod room;
+pub mod setup;
 pub mod ticket_payload;
 
 use anyhow::Result;
@@ -57,9 +58,12 @@ pub enum Command {
         #[arg(long, value_name = "URL")]
         relay: Option<String>,
     },
-    /// Open the cc-connect TUI: vertical split with chat on the left and an
-    /// embedded `claude` PTY on the right. Thin wrapper around the
-    /// `cc-connect-tui` binary that ships next to this one.
+    /// Open a Room. Detects an installed terminal multiplexer (zellij
+    /// preferred, tmux fallback) and spawns a 60/40 layout with `claude`
+    /// on the left and `cc-chat-ui` on the right; both panes inherit
+    /// `CC_CONNECT_ROOM` so the hook fires + chat-ui finds chat.sock.
+    /// If neither multiplexer is installed, falls back to the embedded
+    /// `cc-connect-tui` single-window mode.
     Room {
         #[command(subcommand)]
         cmd: RoomCmd,

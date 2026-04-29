@@ -1,0 +1,17 @@
+// cc-connect zellij layout — claude on the left (60%), chat-ui on the
+// right (40%). Both panes inherit `CC_CONNECT_ROOM` from the parent
+// shell (the cc-connect launcher exports it before exec'ing zellij), so
+// claude's hook fires correctly and chat-ui finds the right chat.sock.
+//
+// Embedded into the cc-connect binary via include_str! so the launcher
+// doesn't depend on a layouts/ install path.
+layout {
+    pane split_direction="vertical" {
+        pane size="60%" {
+            command "claude"
+        }
+        pane size="40%" {
+            command "cc-chat-ui"
+        }
+    }
+}
