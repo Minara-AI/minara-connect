@@ -27,7 +27,7 @@
 //! - on SIGTERM/SIGINT: clean up the PID file then exit 0.
 
 use anyhow::{anyhow, bail, Context, Result};
-use cc_connect_core::{identity::Identity, ticket::encode_room_code};
+use cc_connect_core::ticket::encode_room_code;
 use iroh::{endpoint::RelayMode, Endpoint, RelayMap, SecretKey};
 use iroh_gossip::{
     net::{Gossip, GOSSIP_ALPN},
@@ -288,8 +288,19 @@ pub fn run_daemon(relay: Option<&str>) -> Result<()> {
 }
 
 async fn daemon_async(relay: Option<&str>) -> Result<()> {
-    let identity = load_identity()?;
-    let secret_key = SecretKey::from_bytes(&identity.seed_bytes());
+    // The daemon uses an EPHEMERAL random identity, NOT the user's
+    // `~/.cc-connect/identity.key`. Reason: when this daemon and a
+    // chat_session run on the same machine sharing one identity, both
+    // iroh endpoints claim the same NodeId. iroh-gossip then delivers
+    // each gossip event to whichever endpoint subscribed first — which
+    // is host-bg, a passive bootstrap node with no chat listener — and
+    // the bytes get black-holed before reaching the user's TUI. Giving
+    // host-bg its own NodeId makes it a distinct peer in the mesh, so
+    // gossip events fan out to every subscriber correctly.
+    let mut secret_seed = [0u8; 32];
+    getrandom::getrandom(&mut secret_seed)
+        .map_err(|e| anyhow!("OS random for daemon secret key: {e}"))?;
+    let secret_key = SecretKey::from_bytes(&secret_seed);
 
     let mut builder = Endpoint::builder(iroh::endpoint::presets::N0).secret_key(secret_key);
     if let Some(url) = relay {
@@ -371,21 +382,6 @@ async fn daemon_async(relay: Option<&str>) -> Result<()> {
 }
 
 // ---------- helpers ---------------------------------------------------------
-
-fn load_identity() -> Result<Identity> {
-    let path = identity_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create_dir_all {}", parent.display()))?;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
-    Identity::generate_or_load(&path)
-}
-
-fn identity_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("HOME not set")?;
-    Ok(PathBuf::from(home).join(".cc-connect").join("identity.key"))
-}
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
