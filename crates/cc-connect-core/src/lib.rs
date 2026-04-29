@@ -8,6 +8,7 @@ pub mod hook_format;
 pub mod identity;
 pub mod log_io;
 pub mod message;
+pub mod rate_limit;
 pub mod ticket;
 
 mod posix;

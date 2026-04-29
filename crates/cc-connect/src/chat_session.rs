@@ -16,7 +16,13 @@
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
-use cc_connect_core::{identity::Identity, log_io, message::Message, ticket::decode_room_code};
+use cc_connect_core::{
+    identity::Identity,
+    log_io,
+    message::Message,
+    rate_limit::{RateLimitDecision, RateLimiter},
+    ticket::decode_room_code,
+};
 use futures_lite::StreamExt;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, endpoint::RelayMode, Endpoint,
@@ -380,6 +386,11 @@ async fn run_session(
                 return;
             }
         };
+        // Per-author flood guard. Uses receiver-side wall clock so a peer
+        // can't bypass the limit by lying about `msg.ts`. See SECURITY.md
+        // §"Per-author flooding" — the limit is per identity, not per
+        // human; sybil resistance is out of scope for v0.1.
+        let mut rate_limiter = RateLimiter::new();
         while let Some(event) = receiver.next().await {
             let event = match event {
                 Ok(e) => e,
@@ -406,6 +417,25 @@ async fn run_session(
             // Don't echo our own broadcasts back into the log.
             if msg.author == our_pubkey {
                 continue;
+            }
+            match rate_limiter.check_and_record(&msg.author, now_ms()) {
+                RateLimitDecision::Allow => {}
+                RateLimitDecision::Drop { warn } => {
+                    if warn {
+                        let nick_short: String = match msg.nick.as_deref() {
+                            Some(n) if !n.is_empty() => n.to_string(),
+                            _ => msg.author.chars().take(8).collect(),
+                        };
+                        let _ = listener_display
+                            .send(DisplayLine::Warn(format!(
+                                "[chat] rate-limited @{nick_short} (>{}/{}s); dropping further messages from this author until they slow down",
+                                cc_connect_core::rate_limit::RATE_LIMIT_MAX_PER_WINDOW,
+                                cc_connect_core::rate_limit::RATE_LIMIT_WINDOW_MS / 1000,
+                            )))
+                            .await;
+                    }
+                    continue;
+                }
             }
             // file_drop: dial the author's NodeId via iroh-blobs to fetch the
             // bytes, then export them locally.
