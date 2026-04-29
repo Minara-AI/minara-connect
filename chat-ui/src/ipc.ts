@@ -76,8 +76,14 @@ export async function ipcCall(
 
 // ---- typed helpers -------------------------------------------------------
 
+// `source: "human"` tells chat_session this came from a human typing in
+// chat-ui (not from an AI's MCP-driven send). The dispatch routes onto
+// the InputSource::Local channel so peers see the bare nick (no `-cc`
+// suffix) and owner @-mention wakeups fire correctly. cc-connect-mcp
+// omits this field so it defaults to InputSource::Mcp / `<nick>-cc`.
+
 export async function ccSend(topic: string, body: string): Promise<IpcResponse> {
-  return ipcCall(topic, { action: "send", body });
+  return ipcCall(topic, { action: "send", body, source: "human" });
 }
 
 export async function ccAt(
@@ -85,11 +91,11 @@ export async function ccAt(
   nick: string,
   body: string,
 ): Promise<IpcResponse> {
-  return ipcCall(topic, { action: "at", nick, body });
+  return ipcCall(topic, { action: "at", nick, body, source: "human" });
 }
 
 export async function ccDrop(topic: string, path: string): Promise<IpcResponse> {
-  return ipcCall(topic, { action: "drop", path });
+  return ipcCall(topic, { action: "drop", path, source: "human" });
 }
 
 export async function ccRecent(topic: string, limit = 20): Promise<IpcResponse> {

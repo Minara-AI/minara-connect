@@ -190,7 +190,20 @@ pub async fn spawn(cfg: ChatSessionConfig) -> Result<ChatHandle> {
     // loop can tag those lines as InputSource::Mcp and rebrand the nick
     // to `<self_nick>-cc`.
     let (mcp_tx, mcp_rx) = mpsc::channel::<String>(32);
-    let join = tokio::spawn(run_session(cfg, display_tx, input_rx, mcp_tx, mcp_rx));
+    // Clone of `input_tx` for the IPC server: when chat-ui marks a
+    // payload as `source: "human"` the IPC dispatch routes onto this
+    // Sender, so it lands in `input_rx` and the send loop tags it as
+    // InputSource::Local — peers see the human's nick (no `-cc` suffix)
+    // and owner @-mention wakeups fire correctly.
+    let local_input_tx = input_tx.clone();
+    let join = tokio::spawn(run_session(
+        cfg,
+        display_tx,
+        input_rx,
+        local_input_tx,
+        mcp_tx,
+        mcp_rx,
+    ));
     Ok(ChatHandle {
         display_rx,
         input_tx,
@@ -202,6 +215,7 @@ async fn run_session(
     cfg: ChatSessionConfig,
     display_tx: mpsc::Sender<DisplayLine>,
     mut input_rx: mpsc::Receiver<String>,
+    local_input_tx: mpsc::Sender<String>,
     mcp_input_tx: mpsc::Sender<String>,
     mut mcp_input_rx: mpsc::Receiver<String>,
 ) -> Result<()> {
@@ -328,12 +342,14 @@ async fn run_session(
             std::fs::Permissions::from_mode(0o600),
         );
         let mcp_input_tx = mcp_input_tx.clone();
+        let local_input_tx = local_input_tx.clone();
         let ipc_log_path = log_path.clone();
         let ipc_files_dir = files_dir_for(&topic_id_hex);
         let ipc_mention_state = mention_state.clone();
         Some(tokio::spawn(async move {
             ipc_server_loop(
                 listener,
+                local_input_tx,
                 mcp_input_tx,
                 ipc_log_path,
                 ipc_files_dir,
@@ -972,7 +988,8 @@ impl Drop for IpcSocketGuard {
 /// `{"ok": bool}` plus optional `data` / `err`.
 async fn ipc_server_loop(
     listener: tokio::net::UnixListener,
-    input_tx: mpsc::Sender<String>,
+    local_input_tx: mpsc::Sender<String>,
+    mcp_input_tx: mpsc::Sender<String>,
     log_path: PathBuf,
     files_dir: PathBuf,
     mention_state: std::sync::Arc<MentionState>,
@@ -982,19 +999,29 @@ async fn ipc_server_loop(
             Ok(p) => p,
             Err(_) => return,
         };
-        let input_tx = input_tx.clone();
+        let local_input_tx = local_input_tx.clone();
+        let mcp_input_tx = mcp_input_tx.clone();
         let log_path = log_path.clone();
         let files_dir = files_dir.clone();
         let mention_state = mention_state.clone();
         tokio::spawn(async move {
-            handle_ipc_client(stream, input_tx, log_path, files_dir, mention_state).await
+            handle_ipc_client(
+                stream,
+                local_input_tx,
+                mcp_input_tx,
+                log_path,
+                files_dir,
+                mention_state,
+            )
+            .await
         });
     }
 }
 
 async fn handle_ipc_client(
     stream: tokio::net::UnixStream,
-    input_tx: mpsc::Sender<String>,
+    local_input_tx: mpsc::Sender<String>,
+    mcp_input_tx: mpsc::Sender<String>,
     log_path: PathBuf,
     files_dir: PathBuf,
     mention_state: std::sync::Arc<MentionState>,
@@ -1012,7 +1039,15 @@ async fn handle_ipc_client(
         if n == 0 {
             return;
         }
-        let resp = dispatch_ipc(&line, &input_tx, &log_path, &files_dir, &mention_state).await;
+        let resp = dispatch_ipc(
+            &line,
+            &local_input_tx,
+            &mcp_input_tx,
+            &log_path,
+            &files_dir,
+            &mention_state,
+        )
+        .await;
         let mut out = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{\"ok\":false,\"err\":\"encode\"}".to_vec());
         out.push(b'\n');
         if write_half.write_all(&out).await.is_err() {
@@ -1037,9 +1072,29 @@ struct IpcResponse {
 const WAIT_FOR_MENTION_MAX_MS: u64 = 600_000;
 const WAIT_FOR_MENTION_DEFAULT_MS: u64 = 300_000;
 
+/// Pick the input channel for an IPC `send`/`at`/`drop` based on the
+/// optional `source` field in the request.
+///
+///   - `"human"` → Local channel (peers see the bare nick; owner
+///     @-mention wakeups fire). chat-ui sets this.
+///   - `"ai"` (default for backwards compat) → Mcp channel (peers see
+///     `<nick>-cc`; treated as the AI's voice). cc-connect-mcp uses this
+///     by omission.
+fn pick_input_channel<'a>(
+    payload: &serde_json::Value,
+    local_input_tx: &'a mpsc::Sender<String>,
+    mcp_input_tx: &'a mpsc::Sender<String>,
+) -> &'a mpsc::Sender<String> {
+    match payload.get("source").and_then(|x| x.as_str()) {
+        Some("human") => local_input_tx,
+        _ => mcp_input_tx,
+    }
+}
+
 async fn dispatch_ipc(
     raw: &str,
-    input_tx: &mpsc::Sender<String>,
+    local_input_tx: &mpsc::Sender<String>,
+    mcp_input_tx: &mpsc::Sender<String>,
     log_path: &Path,
     files_dir: &Path,
     mention_state: &std::sync::Arc<MentionState>,
@@ -1067,7 +1122,8 @@ async fn dispatch_ipc(
                     }
                 }
             };
-            let _ = input_tx.send(body).await;
+            let tx = pick_input_channel(&v, local_input_tx, mcp_input_tx);
+            let _ = tx.send(body).await;
             ok_response()
         }
         "at" => {
@@ -1080,7 +1136,8 @@ async fn dispatch_ipc(
                     data: None,
                 };
             }
-            let _ = input_tx.send(format!("@{nick} {body}")).await;
+            let tx = pick_input_channel(&v, local_input_tx, mcp_input_tx);
+            let _ = tx.send(format!("@{nick} {body}")).await;
             ok_response()
         }
         "drop" => {
@@ -1094,7 +1151,8 @@ async fn dispatch_ipc(
                     }
                 }
             };
-            let _ = input_tx.send(format!("/drop {path}")).await;
+            let tx = pick_input_channel(&v, local_input_tx, mcp_input_tx);
+            let _ = tx.send(format!("/drop {path}")).await;
             ok_response()
         }
         "recent" => {
