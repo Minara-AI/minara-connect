@@ -26,21 +26,24 @@ use std::path::{Path, PathBuf};
 /// error prints + returns `Ok(())` so the wizard doesn't block startup.
 pub fn ensure_mcp_installed() -> Result<()> {
     let mcp_path = locate_mcp_binary()?;
-    let settings = settings_path();
-    if mcp_already_installed(&settings, &mcp_path)? {
+    if mcp_already_installed(&mcp_path)? {
         return Ok(());
     }
     println!();
     println!("cc-connect-mcp gives the Claude Code in your room these tools:");
-    println!("  cc_send / cc_at / cc_drop / cc_recent / cc_list_files");
+    println!("  cc_send / cc_at / cc_drop / cc_recent / cc_list_files / cc_save_summary");
     println!("Without it, Claude can read chat (via the hook) but can't reply.");
     println!();
     if !confirm("Install the MCP server now?", true)? {
         println!("Skipping MCP install. Run `cc-connect-tui` again to retry.");
         return Ok(());
     }
-    install_mcp(&settings, &mcp_path)?;
-    println!("✓ MCP server installed.");
+    if try_install_via_claude_cli(&mcp_path)? {
+        println!("✓ MCP server installed via 'claude mcp add' (canonical path).");
+    } else {
+        install_mcp_in_claude_json(&mcp_path)?;
+        println!("✓ MCP server installed in ~/.claude.json ('claude' CLI not on PATH).");
+    }
     println!("  Restart Claude Code so it picks up the new tools.");
     Ok(())
 }
@@ -60,37 +63,86 @@ fn locate_mcp_binary() -> Result<PathBuf> {
     Ok(bin)
 }
 
-fn mcp_already_installed(settings: &Path, mcp_path: &Path) -> Result<bool> {
-    if !settings.exists() {
-        return Ok(false);
-    }
-    let raw = std::fs::read_to_string(settings)?;
-    if raw.trim().is_empty() {
-        return Ok(false);
-    }
-    let v: serde_json::Value = serde_json::from_str(&raw)?;
+/// True if cc-connect-mcp is registered anywhere Claude Code reads MCP from:
+///   - ~/.claude.json::mcpServers (canonical user-scope)
+///   - ~/.claude/settings.json::mcpServers (legacy / version-dependent)
+///
+/// Match by command path so a renamed entry-name doesn't fool us.
+fn mcp_already_installed(mcp_path: &Path) -> Result<bool> {
     let target = mcp_path.to_string_lossy().to_string();
-    if let Some(servers) = v.get("mcpServers").and_then(|x| x.as_object()) {
-        for (_name, entry) in servers {
-            if entry.get("command").and_then(|x| x.as_str()) == Some(&target) {
-                return Ok(true);
+    for path in [claude_json_path(), settings_path()] {
+        if !path.exists() {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(servers) = v.get("mcpServers").and_then(|x| x.as_object()) {
+            for (_name, entry) in servers {
+                if entry.get("command").and_then(|x| x.as_str()) == Some(&target) {
+                    return Ok(true);
+                }
             }
         }
     }
     Ok(false)
 }
 
-fn install_mcp(settings: &Path, mcp_path: &Path) -> Result<()> {
-    let parent = settings
-        .parent()
-        .ok_or_else(|| anyhow!("settings path has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    if settings.exists() {
-        let bak = settings.with_extension(format!("json.bak.{}", now_secs()));
-        std::fs::copy(settings, &bak)?;
+/// Try `claude mcp add cc-connect <path> --scope user`. Returns true on
+/// success, false if `claude` isn't on PATH (so the caller falls back to
+/// direct JSON write).
+fn try_install_via_claude_cli(mcp_path: &Path) -> Result<bool> {
+    use std::process::{Command, Stdio};
+    if which("claude").is_none() {
+        return Ok(false);
     }
-    let mut data: serde_json::Value = if settings.exists() {
-        let raw = std::fs::read_to_string(settings)?;
+    // Remove any prior entry (ignore failure — entry might not exist).
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "cc-connect", "--scope", "user"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let status = Command::new("claude")
+        .args(["mcp", "add", "cc-connect"])
+        .arg(mcp_path)
+        .args(["--scope", "user"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("spawn `claude mcp add`")?;
+    Ok(status.success())
+}
+
+fn which(cmd: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(cmd);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn install_mcp_in_claude_json(mcp_path: &Path) -> Result<()> {
+    let cj = claude_json_path();
+    if let Some(parent) = cj.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if cj.exists() {
+        let bak = cj.with_extension(format!("json.bak.{}", now_secs()));
+        let _ = std::fs::copy(&cj, &bak);
+    }
+    let mut data: serde_json::Value = if cj.exists() {
+        let raw = std::fs::read_to_string(&cj)?;
         if raw.trim().is_empty() {
             serde_json::json!({})
         } else {
@@ -103,7 +155,7 @@ fn install_mcp(settings: &Path, mcp_path: &Path) -> Result<()> {
 
     let root = data
         .as_object_mut()
-        .ok_or_else(|| anyhow!("settings.json root is not an object"))?;
+        .ok_or_else(|| anyhow!("~/.claude.json root is not an object"))?;
     let servers = root
         .entry("mcpServers".to_string())
         .or_insert_with(|| serde_json::json!({}));
@@ -111,22 +163,20 @@ fn install_mcp(settings: &Path, mcp_path: &Path) -> Result<()> {
         .as_object_mut()
         .ok_or_else(|| anyhow!("mcpServers is not an object"))?;
 
-    // Drop any prior cc-connect entry so we don't duplicate. Match by
-    // command path rather than name, since the user may have renamed it.
     servers.retain(|_k, v| v.get("command").and_then(|x| x.as_str()) != Some(target.as_str()));
-
     servers.insert(
         "cc-connect".to_string(),
-        serde_json::json!({
-            "command": target,
-            "args": []
-        }),
+        serde_json::json!({"command": target, "args": []}),
     );
 
     let written = serde_json::to_string_pretty(&data)? + "\n";
-    std::fs::write(settings, &written)?;
-    let _ = std::fs::set_permissions(settings, std::fs::Permissions::from_mode(0o600));
+    std::fs::write(&cj, &written)?;
+    let _ = std::fs::set_permissions(&cj, std::fs::Permissions::from_mode(0o600));
     Ok(())
+}
+
+fn claude_json_path() -> PathBuf {
+    home_dir().join(".claude.json")
 }
 
 // ---- Hook (Claude Code settings.json) --------------------------------------

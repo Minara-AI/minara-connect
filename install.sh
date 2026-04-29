@@ -100,6 +100,11 @@ MCP_BIN="$REPO_ROOT/target/release/cc-connect-mcp"
 # ---------- 3. wire the UserPromptSubmit hook ---------------------------------
 CLAUDE_DIR="$HOME/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
+# Canonical user-scope MCP config lives at ~/.claude.json (Claude Code's
+# `claude mcp list` reads from this), NOT $CLAUDE_DIR/settings.json. We
+# write to settings.json for the hook (which IS read from there) but to
+# ~/.claude.json for MCP.
+CLAUDE_JSON="$HOME/.claude.json"
 mkdir -p "$CLAUDE_DIR"
 
 install_hook_jq() {
@@ -164,36 +169,49 @@ settings_path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }
 
-install_mcp_jq() {
-  # Register cc-connect-mcp in settings.json::mcpServers. Idempotent —
-  # any existing "cc-connect" entry is overwritten. Other tools' entries
-  # are left alone.
+install_mcp_via_claude_cli() {
+  # Authoritative path: let Claude Code own the registration. This goes
+  # to its canonical user-scope config (`~/.claude.json::mcpServers`)
+  # via Claude Code's own logic, which several version of `claude` use
+  # at startup. Returns 0 on success, 1 if `claude` isn't on PATH.
+  local mcp_path="$1"
+  command -v claude >/dev/null 2>&1 || return 1
+  # Remove any prior entry (ignore failure — entry might not exist).
+  claude mcp remove cc-connect --scope user >/dev/null 2>&1 || true
+  claude mcp add cc-connect "$mcp_path" --scope user >/dev/null 2>&1
+}
+
+install_mcp_claudejson_jq() {
+  # Fallback when `claude` CLI isn't available: write directly to
+  # ~/.claude.json::mcpServers (the canonical user-scope MCP config
+  # location, NOT ~/.claude/settings.json — that file's mcpServers is
+  # only respected by some Claude Code versions). Idempotent.
   local mcp_path="$1" tmp
   tmp="$(mktemp)"
-  if [[ -s "$SETTINGS" ]]; then
+  if [[ -s "$CLAUDE_JSON" ]]; then
     jq --arg path "$mcp_path" '
       .mcpServers //= {} |
       .mcpServers["cc-connect"] = {command: $path, args: []}
-    ' "$SETTINGS" > "$tmp"
+    ' "$CLAUDE_JSON" > "$tmp"
   else
     jq -n --arg path "$mcp_path" '
       {mcpServers: {"cc-connect": {command: $path, args: []}}}
     ' > "$tmp"
   fi
-  mv "$tmp" "$SETTINGS"
+  mv "$tmp" "$CLAUDE_JSON"
 }
 
-install_mcp_python() {
+install_mcp_claudejson_python() {
   local mcp_path="$1"
-  python3 - "$SETTINGS" "$mcp_path" <<'PY'
+  python3 - "$CLAUDE_JSON" "$mcp_path" <<'PY'
 import json, sys, pathlib
-settings_path, mcp_path = pathlib.Path(sys.argv[1]), sys.argv[2]
+cj_path, mcp_path = pathlib.Path(sys.argv[1]), sys.argv[2]
 data = {}
-if settings_path.exists() and settings_path.stat().st_size > 0:
-    data = json.loads(settings_path.read_text())
+if cj_path.exists() and cj_path.stat().st_size > 0:
+    data = json.loads(cj_path.read_text())
 servers = data.setdefault("mcpServers", {})
 servers["cc-connect"] = {"command": mcp_path, "args": []}
-settings_path.write_text(json.dumps(data, indent=2) + "\n")
+cj_path.write_text(json.dumps(data, indent=2) + "\n")
 PY
 }
 
@@ -216,16 +234,22 @@ else
   warn "skipped settings.json edit. Hook NOT wired — \`cc-connect\` chats won't surface in Claude Code until you add the hook manually."
 fi
 
-if confirm "Install cc-connect MCP server → $SETTINGS::mcpServers?" Y; then
-  if command -v jq >/dev/null 2>&1; then
-    install_mcp_jq "$MCP_BIN"
-  elif command -v python3 >/dev/null 2>&1; then
-    install_mcp_python "$MCP_BIN"
+if confirm "Install cc-connect MCP server (so Claude can chat back)?" Y; then
+  if install_mcp_via_claude_cli "$MCP_BIN"; then
+    ok "mcp server installed via 'claude mcp add' (canonical path)"
   else
-    fail "neither jq nor python3 available — install one and re-run, or edit $SETTINGS manually."
+    # Fallback: write to ~/.claude.json directly. Use jq if available,
+    # python3 otherwise.
+    if command -v jq >/dev/null 2>&1; then
+      install_mcp_claudejson_jq "$MCP_BIN"
+    elif command -v python3 >/dev/null 2>&1; then
+      install_mcp_claudejson_python "$MCP_BIN"
+    else
+      fail "neither 'claude' CLI nor jq/python3 available — install one and re-run, or run 'claude mcp add cc-connect $MCP_BIN --scope user' manually."
+    fi
+    chmod 600 "$CLAUDE_JSON"
+    ok "mcp server installed in $CLAUDE_JSON ('claude' CLI not on PATH)"
   fi
-  chmod 600 "$SETTINGS"
-  ok "mcp server installed: $MCP_BIN"
 else
   warn "skipped MCP install. Claude in your room won't be able to call cc_send / cc_at / cc_drop / cc_save_summary etc."
 fi
