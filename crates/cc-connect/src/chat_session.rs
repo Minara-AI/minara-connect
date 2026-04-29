@@ -351,6 +351,16 @@ async fn run_session(
                     .await;
                 continue;
             }
+            // Best-effort INDEX.md append — non-fatal if it fails.
+            if msg.kind == cc_connect_core::message::KIND_FILE_DROP {
+                if let Err(e) = append_file_index_entry(&listener_files_dir, &msg) {
+                    let _ = listener_display
+                        .send(DisplayLine::Warn(format!(
+                            "[chat] INDEX.md append failed: {e:#}"
+                        )))
+                        .await;
+                }
+            }
             // Prefer the sender's self-declared nick (v0.2 field) over the
             // pubkey-prefix fallback. Receivers see the same name across
             // peers as the sender intended.
@@ -438,6 +448,17 @@ async fn run_session(
                 .await;
             continue;
         }
+        // INDEX.md append for our own file_drops (best-effort).
+        if msg.kind == cc_connect_core::message::KIND_FILE_DROP {
+            let files_dir = files_dir_for(&topic_id_hex);
+            if let Err(e) = append_file_index_entry(&files_dir, &msg) {
+                let _ = display_tx
+                    .send(DisplayLine::Warn(format!(
+                        "[chat] INDEX.md append failed: {e:#}"
+                    )))
+                    .await;
+            }
+        }
         let bytes = msg.to_canonical_json()?;
         if let Err(e) = sender.broadcast(Bytes::from(bytes)).await {
             let _ = display_tx
@@ -488,6 +509,41 @@ fn rooms_dir(topic_id_hex: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"));
     home.join(".cc-connect").join("rooms").join(topic_id_hex)
+}
+
+/// Append a line to `<files_dir>/INDEX.md` summarising a file_drop. Used
+/// by both the listener (incoming drops) and the send path (our own /drop).
+/// The INDEX.md is human-readable and also injected into the hook output
+/// so Claude has a stable reference of every file in the room.
+fn append_file_index_entry(files_dir: &Path, msg: &Message) -> Result<()> {
+    if msg.kind != cc_connect_core::message::KIND_FILE_DROP {
+        return Ok(());
+    }
+    std::fs::create_dir_all(files_dir)
+        .with_context(|| format!("create_dir_all {}", files_dir.display()))?;
+    let _ = std::fs::set_permissions(files_dir, std::fs::Permissions::from_mode(0o700));
+    let path = files_dir.join("INDEX.md");
+    let nick = match msg.nick.as_deref() {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => msg.author.chars().take(8).collect(),
+    };
+    let size = msg.blob_size.unwrap_or(0);
+    let local_path = files_dir.join(format!("{}-{}", msg.id, msg.body));
+    let line = format!(
+        "- {nick}  {filename}  ({size}B)  @file:{path}\n",
+        filename = msg.body,
+        path = local_path.display(),
+    );
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    f.write_all(line.as_bytes())
+        .with_context(|| format!("append {}", path.display()))?;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
 }
 
 /// Best-effort load of `self_nick` from `~/.cc-connect/config.json`. Any
@@ -827,6 +883,37 @@ async fn dispatch_ipc(
                 },
             }
         }
+        "save_summary" => {
+            let text = match v.get("text").and_then(|x| x.as_str()) {
+                Some(s) => s.to_string(),
+                None => {
+                    return IpcResponse {
+                        ok: false,
+                        err: Some("MISSING_TEXT".into()),
+                        data: None,
+                    }
+                }
+            };
+            // The summary lives next to log.jsonl: rooms/<topic>/summary.md.
+            let dir = match log_path.parent() {
+                Some(p) => p.to_path_buf(),
+                None => {
+                    return IpcResponse {
+                        ok: false,
+                        err: Some("NO_LOG_PARENT".into()),
+                        data: None,
+                    }
+                }
+            };
+            match save_summary(&dir, &text) {
+                Ok(()) => ok_response(),
+                Err(e) => IpcResponse {
+                    ok: false,
+                    err: Some(format!("{e:#}")),
+                    data: None,
+                },
+            }
+        }
         other => IpcResponse {
             ok: false,
             err: Some(format!("UNKNOWN_ACTION: {other}")),
@@ -861,6 +948,34 @@ fn recent_messages(log_path: &Path, limit: usize) -> Result<Vec<serde_json::Valu
             })
         })
         .collect())
+}
+
+/// Write `text` atomically to `<room_dir>/summary.md`. Creates the file
+/// (or overwrites) with mode 0600. Capped at 64 KiB — anything longer
+/// is truncated rather than rejected, since the hook injection budget is
+/// only a fraction of that anyway.
+fn save_summary(room_dir: &Path, text: &str) -> Result<()> {
+    const MAX_BYTES: usize = 64 * 1024;
+    std::fs::create_dir_all(room_dir)
+        .with_context(|| format!("create_dir_all {}", room_dir.display()))?;
+    let path = room_dir.join("summary.md");
+    let mut payload = if text.len() > MAX_BYTES {
+        let mut s = text.as_bytes()[..MAX_BYTES].to_vec();
+        s.extend_from_slice("\n\n…(truncated to 64 KiB)\n".as_bytes());
+        s
+    } else {
+        text.as_bytes().to_vec()
+    };
+    if !payload.ends_with(b"\n") {
+        payload.push(b'\n');
+    }
+    let tmp = path.with_extension("md.tmp");
+    std::fs::write(&tmp, &payload)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("rename {} → {}", tmp.display(), path.display()))?;
+    Ok(())
 }
 
 fn list_files_in(files_dir: &Path, limit: usize) -> Result<Vec<serde_json::Value>> {

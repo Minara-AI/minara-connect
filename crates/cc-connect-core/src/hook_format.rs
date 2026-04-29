@@ -37,6 +37,17 @@ pub struct HookInput<'a> {
     /// (only the always-on `@cc` / `@claude` / `@all` / `@here` tokens
     /// still trigger the mark).
     pub self_nick: Option<&'a str>,
+    /// topic_id_hex → markdown summary text. Optional per-room rolling
+    /// summary written by Claude via the MCP `cc_save_summary` tool.
+    /// Injected ahead of the verbatim chat lines so Claude can pick up
+    /// long-running room context without burning its 8 KB budget on
+    /// raw history.
+    pub room_summaries: &'a HashMap<String, String>,
+    /// topic_id_hex → markdown listing of files dropped into the room
+    /// (auto-maintained by chat_session at `<topic>/files/INDEX.md`).
+    /// Last N entries are injected so Claude knows what files exist and
+    /// where to find them on disk.
+    pub room_file_indexes: &'a HashMap<String, String>,
 }
 
 /// Render the Hook's stdout payload. Always returns a complete (possibly
@@ -70,7 +81,105 @@ pub fn render(input: &HookInput) -> String {
         })
         .collect();
 
-    fit_to_budget(lines, HOOK_OUTPUT_BUDGET)
+    // Build the summary + files-index preamble. These fixed sections eat
+    // a slice of the 8 KiB budget (1.5 KiB each at most); the verbatim
+    // chat-line block uses whatever's left.
+    let mut preamble = String::new();
+    let mut topics: Vec<&String> = input.rooms.keys().collect();
+    topics.sort();
+    for topic in &topics {
+        if let Some(summary) = input.room_summaries.get(*topic) {
+            let trimmed = summary.trim();
+            if !trimmed.is_empty() {
+                let header = if multi_room {
+                    format!(
+                        "[cc-connect summary {}]",
+                        topic.chars().take(6).collect::<String>().to_ascii_lowercase()
+                    )
+                } else {
+                    "[cc-connect summary]".to_string()
+                };
+                let body = truncate_head(trimmed, SUMMARY_BUDGET);
+                preamble.push_str(&header);
+                preamble.push('\n');
+                preamble.push_str(&body);
+                preamble.push_str("\n\n");
+            }
+        }
+    }
+    for topic in &topics {
+        if let Some(idx) = input.room_file_indexes.get(*topic) {
+            let trimmed = idx.trim();
+            if !trimmed.is_empty() {
+                let header = if multi_room {
+                    format!(
+                        "[cc-connect files {}]",
+                        topic.chars().take(6).collect::<String>().to_ascii_lowercase()
+                    )
+                } else {
+                    "[cc-connect files]".to_string()
+                };
+                let body = tail_lines_within_budget(trimmed, FILES_INDEX_BUDGET);
+                preamble.push_str(&header);
+                preamble.push('\n');
+                preamble.push_str(&body);
+                preamble.push_str("\n\n");
+            }
+        }
+    }
+
+    let chat_budget = HOOK_OUTPUT_BUDGET.saturating_sub(preamble.len());
+    let chat_block = fit_to_budget(lines, chat_budget);
+    format!("{preamble}{chat_block}")
+}
+
+/// Soft caps for the new preamble sections. Tuned so even with both
+/// at full size the verbatim chat block still has > 5 KiB left.
+const SUMMARY_BUDGET: usize = 1536;
+const FILES_INDEX_BUDGET: usize = 1536;
+
+/// Truncate a UTF-8 string to roughly `max` bytes from the head, slicing
+/// at a char boundary and appending a clear marker if cut.
+fn truncate_head(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let marker = "\n…(summary truncated)";
+    let mut cut = max.saturating_sub(marker.len());
+    while !s.is_char_boundary(cut) && cut > 0 {
+        cut -= 1;
+    }
+    format!("{}{}", &s[..cut], marker)
+}
+
+/// Take the trailing lines of `s` (most recent) whose total byte length
+/// fits in `max`. Always cuts on line boundaries.
+fn tail_lines_within_budget(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut total = 0usize;
+    let mut start_idx = s.len();
+    for (i, _ch) in s.char_indices().rev() {
+        // Walk back over the line; cut at the previous newline.
+        let candidate_len = s.len() - i;
+        if candidate_len > max {
+            break;
+        }
+        if i == 0 || s.as_bytes()[i - 1] == b'\n' {
+            // Line boundary at i.
+            total = candidate_len;
+            start_idx = i;
+        }
+    }
+    if total == 0 {
+        // Even the last line is too long; fall back to head-truncate.
+        return truncate_head(s, max);
+    }
+    let mut out = String::with_capacity(total + 24);
+    out.push_str("…(older entries truncated)\n");
+    out.push_str(&s[start_idx..]);
+    out
 }
 
 fn format_line(
@@ -249,6 +358,11 @@ mod tests {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
+    fn empty_map() -> &'static HashMap<String, String> {
+        static M: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+        M.get_or_init(HashMap::new)
+    }
+
     fn make(id: &str, author: &str, ts: i64, body: &str) -> Message {
         Message::new(id, author.to_string(), ts, body.to_string()).unwrap()
     }
@@ -261,7 +375,7 @@ mod tests {
     fn empty_rooms_renders_empty_string() {
         let nm = nicks(&[]);
         let rooms = HashMap::new();
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         assert_eq!(out, "");
     }
 
@@ -269,7 +383,7 @@ mod tests {
     fn single_room_no_messages_renders_empty() {
         let nm = nicks(&[]);
         let rooms = one_room("a1b2c3d4e5f6", vec![]);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         assert_eq!(out, "");
     }
 
@@ -284,7 +398,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, "alice")]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "hi")];
         let rooms = one_room("a1b2c3d4e5f6", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         assert_eq!(out, "[chatroom @alice 00:00Z] hi\n");
     }
 
@@ -293,7 +407,7 @@ mod tests {
         let nm = nicks(&[]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "x")];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         assert_eq!(out, "[chatroom @hnvcppgo 00:00Z] x\n");
     }
 
@@ -303,7 +417,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, bad_nick)]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "x")];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         // \n→?, \t→?, é (2 bytes 0xc3 0xa9) → 2× '?' per byte-for-byte rule.
         assert!(out.contains("@al?ice???"), "got: {out}");
     }
@@ -314,7 +428,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, "x")]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, body_raw)];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         assert!(
             out.contains("a b c é d"),
             "tab+DEL→space, é preserved: got {out}"
@@ -347,7 +461,7 @@ mod tests {
             "bbbbbb222222".to_string(),
             vec![make(&ulid(2), B_PUBKEY, 0, "from B")],
         );
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         let expected =
             "[chatroom aaaaaa @alice 00:00Z] from A\n\
              [chatroom bbbbbb @bob 00:00Z] from B\n";
@@ -369,7 +483,7 @@ mod tests {
             "bbbbbb".to_string(),
             vec![make(&ulid(2), B_PUBKEY, 0, "B middle")],
         );
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("A first"));
@@ -389,7 +503,7 @@ mod tests {
             msgs.push(make(&id, A_PUBKEY, 0, &body));
         }
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
 
         assert!(out.len() <= HOOK_OUTPUT_BUDGET, "MUST fit within 8 KiB; got {}", out.len());
         assert!(
@@ -423,7 +537,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, "alice")]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "small")];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         assert!(!out.starts_with("[chatroom] ("));
     }
 
@@ -432,7 +546,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, "alice")]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "")];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
         assert_eq!(out, "[chatroom @alice 00:00Z] \n");
     }
 
@@ -458,6 +572,8 @@ mod tests {
             nicknames: &nm,
             rooms_base: std::path::Path::new("/var/tmp/cc-test/rooms"),
             self_nick: None,
+            room_summaries: empty_map(),
+            room_file_indexes: empty_map(),
         });
         let expected_path = format!(
             "/var/tmp/cc-test/rooms/{topic}/files/{}-design.svg",
@@ -504,6 +620,8 @@ mod tests {
             nicknames: &nm,
             rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"),
             self_nick: Some("bob"),
+            room_summaries: empty_map(),
+            room_file_indexes: empty_map(),
         });
         assert!(
             out.starts_with("[chatroom for-you @alice 00:00Z]"),

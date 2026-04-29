@@ -164,6 +164,17 @@ fn tool_definitions() -> Value {
                     "limit": {"type": "integer", "description": "Cap on the number of entries (default 50, max 500).", "minimum": 1, "maximum": 500}
                 }
             }
+        },
+        {
+            "name": "cc_save_summary",
+            "description": "Overwrite the room's rolling summary at ~/.cc-connect/rooms/<topic>/summary.md. The hook injects this summary into every prompt's context so future Claude instances pick up long-running room state without burning their token budget on raw history. Use after digesting a chunk of conversation; keep summaries terse (≤ 1 KiB).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Markdown summary text. Capped at 64 KiB on the server side."}
+                },
+                "required": ["text"]
+            }
         }
     ])
 }
@@ -220,6 +231,14 @@ async fn call_tool(name: &str, args: Value) -> Result<String> {
                 files.as_array().map(|a| a.len()).unwrap_or(0),
                 serde_json::to_string_pretty(&files).unwrap_or_default()
             ))
+        }
+        "cc_save_summary" => {
+            let text = args
+                .get("text")
+                .and_then(|x| x.as_str())
+                .ok_or_else(|| anyhow!("missing `text`"))?;
+            ipc_call(json!({"action": "save_summary", "text": text})).await?;
+            Ok(format!("summary saved ({} bytes)", text.len()))
         }
         other => bail!("unknown tool: {other}"),
     }

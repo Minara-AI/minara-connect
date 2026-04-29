@@ -79,11 +79,15 @@ fn run() -> Result<()> {
     let nicknames = read_nicknames();
     let rooms_base = home_dir().join(".cc-connect").join("rooms");
     let self_nick = read_self_nick();
+    let room_summaries = read_room_summaries(&rooms_base, rooms.keys());
+    let room_file_indexes = read_room_file_indexes(&rooms_base, rooms.keys());
     let output = hook_format::render(&hook_format::HookInput {
         rooms: &rooms,
         nicknames: &nicknames,
         rooms_base: &rooms_base,
         self_nick: self_nick.as_deref(),
+        room_summaries: &room_summaries,
+        room_file_indexes: &room_file_indexes,
     });
 
     // Step 7: write to stdout. Empty output = exit 0 (no marker, no boilerplate).
@@ -262,6 +266,42 @@ fn read_nicknames() -> HashMap<String, String> {
         Err(_) => return HashMap::new(),
     };
     serde_json::from_str(&raw).unwrap_or_default()
+}
+
+/// For each active topic, read `<rooms_base>/<topic>/summary.md` if it
+/// exists. Best-effort: missing / unreadable files just produce no entry.
+fn read_room_summaries<'a, I: Iterator<Item = &'a String>>(
+    rooms_base: &Path,
+    topics: I,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for topic in topics {
+        let path = rooms_base.join(topic).join("summary.md");
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            if !s.trim().is_empty() {
+                out.insert(topic.clone(), s);
+            }
+        }
+    }
+    out
+}
+
+/// For each active topic, read `<rooms_base>/<topic>/files/INDEX.md` if it
+/// exists. The hook_format renderer trims to a tail-byte budget.
+fn read_room_file_indexes<'a, I: Iterator<Item = &'a String>>(
+    rooms_base: &Path,
+    topics: I,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for topic in topics {
+        let path = rooms_base.join(topic).join("files").join("INDEX.md");
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            if !s.trim().is_empty() {
+                out.insert(topic.clone(), s);
+            }
+        }
+    }
+    out
 }
 
 /// Read `~/.cc-connect/config.json::self_nick`. Returns `None` on any
