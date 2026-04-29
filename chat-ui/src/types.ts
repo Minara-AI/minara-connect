@@ -44,3 +44,16 @@ export interface ChatDaemonPidFile {
   relay: string | null;
   no_relay: boolean;
 }
+
+/** One line in `events.jsonl` (peer to log.jsonl). The chat-daemon writes
+ *  ephemeral notices like rate-limit warnings here so chat-ui can surface
+ *  them in scrollback alongside chat lines. Schema is stable JSON. */
+export interface EventLine {
+  /** Unix-ms wall clock when the daemon recorded the event. */
+  ts: number;
+  /** Stable token. v1 only emits "warn"; future kinds may include
+   *  "marker" (e.g. backfill-complete) or "system". */
+  kind: string;
+  /** Human-readable body. UI dim/yellows it. */
+  body: string;
+}

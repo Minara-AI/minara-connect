@@ -305,15 +305,29 @@ async fn daemon_async(ticket: &str, no_relay: bool, relay: Option<&str>) -> Resu
     // The chat session's display channel is bounded (cap 100). Without a
     // consumer the listener back-pressures — meaning incoming gossip
     // events stop getting written to log.jsonl, and the daemon silently
-    // wedges. We're a headless daemon: drain to /dev/null. (chat-ui tails
-    // log.jsonl directly, not display events.)
+    // wedges. We're a headless daemon, but `Warn` lines (rate-limit
+    // notices, malformed-message drops, broadcast failures) are useful
+    // to surface in chat-ui's scrollback — so we drain everything but
+    // append Warn variants to `events.jsonl` next to log.jsonl. chat-ui
+    // tails events.jsonl in addition to log.jsonl.
     let mut display_rx = std::mem::replace(
         &mut handle.display_rx,
         tokio::sync::mpsc::channel::<DisplayLine>(1).1,
     );
+    let events_path = home_dir()
+        .join(".cc-connect")
+        .join("rooms")
+        .join(&topic_hex)
+        .join("events.jsonl");
     let _drain_task = tokio::spawn(async move {
-        while display_rx.recv().await.is_some() {
-            // discard
+        while let Some(line) = display_rx.recv().await {
+            if let DisplayLine::Warn(body) = line {
+                let _ = append_event(&events_path, "warn", &body);
+            }
+            // Other variants (System / Marker / Incoming / Echo) are not
+            // useful to a headless chat-ui (Incoming + Echo are already
+            // in log.jsonl; System / Marker are connection cosmetics
+            // chat-ui synthesises itself).
         }
     });
 
@@ -412,6 +426,34 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Append one ephemeral event to `events.jsonl` next to `log.jsonl`.
+/// Format mirrors log.jsonl: one JSON object per line with stable schema
+/// `{ts, kind, body}`. chat-ui tails this file for warn surfaces.
+fn append_event(path: &Path, kind: &str, body: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create_dir_all {}", parent.display()))?;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    let line = serde_json::json!({
+        "ts": now_ms(),
+        "kind": kind,
+        "body": body,
+    });
+    let mut bytes = serde_json::to_vec(&line).context("serialise event")?;
+    bytes.push(b'\n');
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    f.write_all(&bytes)
+        .with_context(|| format!("append {}", path.display()))?;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
 }
 
 fn decode_topic_hex(ticket: &str) -> Result<String> {

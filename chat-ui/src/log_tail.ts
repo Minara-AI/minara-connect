@@ -15,7 +15,7 @@
 import { open, statSync, watch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Message } from "./types.ts";
+import type { EventLine, Message } from "./types.ts";
 
 export interface LogTailHandle {
   close(): void;
@@ -27,13 +27,37 @@ export function logPathFor(topic: string): string {
   return join(homedir(), ".cc-connect", "rooms", topic, "log.jsonl");
 }
 
+export function eventsPathFor(topic: string): string {
+  return join(homedir(), ".cc-connect", "rooms", topic, "events.jsonl");
+}
+
 /** Start tailing `log.jsonl`. The handler fires once per parsed message
  *  in chronological (file-order) sequence. Initial backlog (everything
  *  already in the file) is delivered first, then live appends.
  *
  *  Returns a handle whose `close()` cancels the watcher. */
 export function tailLog(topic: string, onLine: LogLineHandler): LogTailHandle {
-  const path = logPathFor(topic);
+  return tailJsonl<Message>(logPathFor(topic), onLine, "log_tail");
+}
+
+export type EventLineHandler = (ev: EventLine) => void;
+
+/** Same append-only tail strategy, reading `events.jsonl` (the
+ *  chat-daemon's ephemeral-notices side-channel). Each line is a JSON
+ *  object with `{ts, kind, body}`. */
+export function tailEvents(topic: string, onEvent: EventLineHandler): LogTailHandle {
+  return tailJsonl<EventLine>(eventsPathFor(topic), onEvent, "events_tail");
+}
+
+/** Generic newline-JSON tail with byte-offset tracking + fs.watch
+ *  fallback to polling. Both `log.jsonl` and `events.jsonl` are
+ *  append-only; if the file shrinks (truncation), we reset offset to 0
+ *  and re-read rather than miss data. */
+function tailJsonl<T>(
+  path: string,
+  onLine: (parsed: T) => void,
+  label: string,
+): LogTailHandle {
   let offset = 0;
   let pending = false;
   let closed = false;
@@ -53,7 +77,6 @@ export function tailLog(topic: string, onLine: LogLineHandler): LogTailHandle {
       return;
     }
     if (size < offset) {
-      // File truncated or replaced. Reset and re-read from 0.
       offset = 0;
       buf = "";
     }
@@ -69,8 +92,6 @@ export function tailLog(topic: string, onLine: LogLineHandler): LogTailHandle {
       }
       const len = size - offset;
       const chunk = Buffer.allocUnsafe(len);
-      // Use fs.read with explicit position — works regardless of fd state.
-      // (Node's fs.read positional form lets us read without seeking.)
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { read, close: closeFd } = require("node:fs") as typeof import("node:fs");
       read(fd, chunk, 0, len, offset, (rerr, bytesRead) => {
@@ -85,14 +106,11 @@ export function tailLog(topic: string, onLine: LogLineHandler): LogTailHandle {
           buf = buf.slice(nl + 1);
           if (line.length > 0) {
             try {
-              const msg = JSON.parse(line) as Message;
-              onLine(msg);
+              const parsed = JSON.parse(line) as T;
+              onLine(parsed);
             } catch {
-              // Skip malformed lines — chat_session always writes valid
-              // JSON, so this only happens if the log was corrupted by
-              // something else. Log to stderr and keep going.
               // eslint-disable-next-line no-console
-              console.error("log_tail: skipping malformed line:", line.slice(0, 80));
+              console.error(`${label}: skipping malformed line:`, line.slice(0, 80));
             }
           }
           nl = buf.indexOf("\n");
@@ -101,19 +119,13 @@ export function tailLog(topic: string, onLine: LogLineHandler): LogTailHandle {
     });
   }
 
-  // Kick off initial read.
   readMore();
 
-  // Then watch. fs.watch on macOS uses kqueue + FSEvents and fires on
-  // append; on Linux it's inotify. Both are fine for our append-only
-  // workload. We re-stat + re-read on every event.
   try {
     watcher = watch(path, { persistent: true }, () => {
       readMore();
     });
   } catch {
-    // File might not exist yet (daemon hasn't started). Poll periodically
-    // until it does, then attach.
     const poll = setInterval(() => {
       if (closed) {
         clearInterval(poll);

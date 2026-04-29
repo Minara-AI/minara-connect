@@ -509,6 +509,14 @@ async fn run_session(
     // 12. Send loop — merge user-typed input (input_rx) and MCP-driven
     // input (mcp_input_rx). Each branch tags its source so we can rewrite
     // the nick: locals send as `self_nick`, MCP sends as `<self_nick>-cc`.
+    //
+    // Outgoing rate limit. Symmetric with the receiver-side limiter above:
+    // a buggy chat-ui or a runaway local Claude can't flood the room
+    // either. Both InputSource::Local AND InputSource::Mcp pass through
+    // it because in the chat-daemon architecture chat-ui sends arrive as
+    // Mcp source (it talks via the IPC `send` action like MCP does), and
+    // we want both kinds of "us" rate-limited.
+    let mut send_rate_limiter = RateLimiter::new();
     let result: Result<()> = loop {
         let (line, source) = tokio::select! {
             biased;
@@ -524,6 +532,26 @@ async fn run_session(
         let body = line.trim_end_matches(['\n', '\r']).to_string();
         if body.is_empty() {
             continue;
+        }
+
+        // Outgoing flood guard. We key on our own pubkey + a per-source
+        // suffix so Local and Mcp share the same window — a person typing
+        // 25 lines in chat-ui plus their AI typing 10 should still trip
+        // the same 30-msg ceiling for the room.
+        match send_rate_limiter.check_and_record(&pubkey_string, now_ms()) {
+            RateLimitDecision::Allow => {}
+            RateLimitDecision::Drop { warn } => {
+                if warn {
+                    let _ = display_tx
+                        .send(DisplayLine::Warn(format!(
+                            "[chat] outgoing rate-limit hit (>{}/{}s); message dropped — slow down",
+                            cc_connect_core::rate_limit::RATE_LIMIT_MAX_PER_WINDOW,
+                            cc_connect_core::rate_limit::RATE_LIMIT_WINDOW_MS / 1000,
+                        )))
+                        .await;
+                }
+                continue;
+            }
         }
 
         // Effective nick for this send. Local = the user; Mcp = the user's

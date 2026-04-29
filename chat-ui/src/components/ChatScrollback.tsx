@@ -1,11 +1,15 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
-import type { Message } from "../types.ts";
+import type { EventLine, Message } from "../types.ts";
 import { KIND_FILE_DROP } from "../types.ts";
 import { bodyMentionsSelf } from "../mention.ts";
 
 export interface ChatScrollbackProps {
   messages: readonly Message[];
+  /** Daemon-emitted ephemeral notices (rate-limit warnings, etc.). Read
+   *  from events.jsonl. Rendered interleaved with messages by timestamp,
+   *  styled distinctly so they don't get confused with chat. */
+  events: readonly EventLine[];
   /** Set of pubkeys we sent (so we can right-align our own bubbles). */
   selfPubkey: string | null;
   selfNick: string | null;
@@ -15,15 +19,24 @@ export interface ChatScrollbackProps {
   visibleRows: number;
 }
 
-interface RenderRow {
-  key: string;
-  ts: number;
-  nick: string;
-  body: string;
-  isOwn: boolean;
-  isMention: boolean;
-  isFileDrop: boolean;
-}
+type RenderRow =
+  | {
+      kind: "msg";
+      key: string;
+      ts: number;
+      nick: string;
+      body: string;
+      isOwn: boolean;
+      isMention: boolean;
+      isFileDrop: boolean;
+    }
+  | {
+      kind: "event";
+      key: string;
+      ts: number;
+      eventKind: string;
+      body: string;
+    };
 
 function formatHHMM(tsMs: number): string {
   const totalMin = Math.floor(tsMs / 60000);
@@ -42,32 +55,41 @@ function nickFor(msg: Message): string {
  *  Mentions of self get a red `(@me)` prefix on peer lines. */
 export function ChatScrollback({
   messages,
+  events,
   selfPubkey,
   selfNick,
   scrollOffset,
   visibleRows,
 }: ChatScrollbackProps) {
-  const rows = useMemo<RenderRow[]>(
-    () =>
-      messages.map((m) => {
-        const isOwn = selfPubkey !== null && m.author === selfPubkey;
-        const isFileDrop = m.kind === KIND_FILE_DROP;
-        return {
-          key: m.id,
-          ts: m.ts,
-          nick: nickFor(m),
-          body: isFileDrop ? `dropped ${m.body}` : m.body,
-          isOwn,
-          // Visual mention only on incoming lines — own messages don't
-          // self-flag (the rendering rule, separate from the wake-up rule).
-          isMention: !isOwn && bodyMentionsSelf(m.body, selfNick),
-          isFileDrop,
-        };
-      }),
-    [messages, selfPubkey, selfNick],
-  );
+  const rows = useMemo<RenderRow[]>(() => {
+    const msgRows: RenderRow[] = messages.map((m) => {
+      const isOwn = selfPubkey !== null && m.author === selfPubkey;
+      const isFileDrop = m.kind === KIND_FILE_DROP;
+      return {
+        kind: "msg",
+        key: m.id,
+        ts: m.ts,
+        nick: nickFor(m),
+        body: isFileDrop ? `dropped ${m.body}` : m.body,
+        isOwn,
+        isMention: !isOwn && bodyMentionsSelf(m.body, selfNick),
+        isFileDrop,
+      };
+    });
+    const eventRows: RenderRow[] = events.map((e, i) => ({
+      kind: "event",
+      // events.jsonl has no id; ts+i is unique-enough within a session.
+      key: `ev-${e.ts}-${i}`,
+      ts: e.ts,
+      eventKind: e.kind,
+      body: e.body,
+    }));
+    // Stable timestamp-merge. JS sort is stable for equal keys, so events
+    // and messages with identical ts keep their relative file order
+    // within their kind.
+    return [...msgRows, ...eventRows].sort((a, b) => a.ts - b.ts);
+  }, [messages, events, selfPubkey, selfNick]);
 
-  // Apply scroll: 0 = show last `visibleRows`. >0 holds N rows back.
   const total = rows.length;
   const end = Math.max(0, total - scrollOffset);
   const start = Math.max(0, end - visibleRows);
@@ -75,22 +97,30 @@ export function ChatScrollback({
 
   return (
     <Box flexDirection="column" flexGrow={1}>
-      {visible.map((r) => (
-        <Box
-          key={r.key}
-          flexDirection="row"
-          justifyContent={r.isOwn ? "flex-end" : "flex-start"}
-        >
-          <Text>
-            <Text dimColor>{formatHHMM(r.ts)} </Text>
-            {r.isMention ? <Text color="red" bold>(@me) </Text> : null}
-            <Text bold color={r.isOwn ? "green" : "cyan"}>
-              [{r.nick}]
-            </Text>{" "}
-            <Text color={r.isMention ? "red" : undefined}>{r.body}</Text>
-          </Text>
-        </Box>
-      ))}
+      {visible.map((r) =>
+        r.kind === "msg" ? (
+          <Box
+            key={r.key}
+            flexDirection="row"
+            justifyContent={r.isOwn ? "flex-end" : "flex-start"}
+          >
+            <Text>
+              <Text dimColor>{formatHHMM(r.ts)} </Text>
+              {r.isMention ? <Text color="red" bold>(@me) </Text> : null}
+              <Text bold color={r.isOwn ? "green" : "cyan"}>
+                [{r.nick}]
+              </Text>{" "}
+              <Text color={r.isMention ? "red" : undefined}>{r.body}</Text>
+            </Text>
+          </Box>
+        ) : (
+          <Box key={r.key} flexDirection="row">
+            <Text color="yellow" dimColor>
+              {formatHHMM(r.ts)} ⚠ {r.body}
+            </Text>
+          </Box>
+        ),
+      )}
       {scrollOffset > 0 ? (
         <Text dimColor>… {scrollOffset} rows back · PgDn to follow</Text>
       ) : null}

@@ -5,8 +5,8 @@ import { HeaderBar } from "./HeaderBar.tsx";
 import { ChatScrollback } from "./ChatScrollback.tsx";
 import { InputBox } from "./InputBox.tsx";
 import { MentionPopup } from "./MentionPopup.tsx";
-import type { Message } from "../types.ts";
-import { tailLog } from "../log_tail.ts";
+import type { EventLine, Message } from "../types.ts";
+import { tailEvents, tailLog } from "../log_tail.ts";
 import { ccSend } from "../ipc.ts";
 import { readChatDaemonPidFile, readSelfNick } from "../ticket.ts";
 import { completeAt, currentAtToken, mentionCandidates } from "../mention.ts";
@@ -27,6 +27,7 @@ export function App({ topic }: AppProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [messages, setMessages] = useState<Message[]>([]);
+  const [events, setEvents] = useState<EventLine[]>([]);
   const [input, setInput] = useState("");
   const [scrollOffset, setScrollOffset] = useState(0);
   const [mentionIdx, setMentionIdx] = useState(0);
@@ -56,6 +57,20 @@ export function App({ topic }: AppProps) {
       if (idx >= 0) list.splice(idx, 1);
       list.unshift(nick);
       while (list.length > RECENT_NICKS_CAP) list.pop();
+    });
+    return () => handle.close();
+  }, [topic]);
+
+  // Tail events.jsonl for daemon warnings (rate-limit, broadcast failure,
+  // etc.). The daemon writes each Warn variant as `{ts, kind, body}` so
+  // we can render them interleaved with chat lines by timestamp.
+  useEffect(() => {
+    const handle = tailEvents(topic, (ev: EventLine) => {
+      setEvents((prev) => {
+        const next = prev.length >= SCROLLBACK_CAP ? prev.slice(1) : prev.slice();
+        next.push(ev);
+        return next;
+      });
     });
     return () => handle.close();
   }, [topic]);
@@ -186,6 +201,7 @@ export function App({ topic }: AppProps) {
       />
       <ChatScrollback
         messages={messages}
+        events={events}
         selfPubkey={selfPubkey}
         selfNick={selfNick}
         scrollOffset={scrollOffset}
