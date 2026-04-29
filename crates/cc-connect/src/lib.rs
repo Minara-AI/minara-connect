@@ -7,6 +7,7 @@
 
 pub mod backfill;
 pub mod chat;
+pub mod chat_daemon;
 pub mod chat_session;
 pub mod doctor;
 pub mod host;
@@ -80,8 +81,55 @@ pub enum Command {
         #[arg(long, value_name = "URL")]
         relay: Option<String>,
     },
+    /// Manage persistent chat-session daemons.
+    ///
+    /// A chat daemon owns the gossip mesh + chat.sock IPC for one Room in
+    /// the background, surviving the TUI / chat-ui panel that started it.
+    /// The launcher uses this to decouple the chat substrate from any
+    /// single window: closing zellij/tmux leaves the daemon running so
+    /// peers continue to see your messages.
+    ChatDaemon {
+        #[command(subcommand)]
+        cmd: ChatDaemonCmd,
+    },
+    /// Internal: chat-daemon entry point invoked by `chat-daemon start`.
+    /// Don't run directly — the parent does the setsid spawn + READY
+    /// handshake.
+    #[command(hide = true, name = "chat-daemon-daemon")]
+    ChatDaemonDaemon {
+        #[arg(long)]
+        ticket: String,
+        #[arg(long)]
+        no_relay: bool,
+        #[arg(long, value_name = "URL")]
+        relay: Option<String>,
+    },
     /// Sanity-check the cc-connect installation.
     Doctor,
+}
+
+#[derive(Subcommand)]
+pub enum ChatDaemonCmd {
+    /// Start a new chat-session daemon for `<ticket>`. Idempotent: if a
+    /// daemon already owns the same topic, prints `ALREADY <topic> <pid>`
+    /// and exits 0 without spawning.
+    Start {
+        /// Room code (`cc1-…`).
+        ticket: String,
+        /// Disable n0's hosted relay servers; LAN-direct only.
+        #[arg(long, conflicts_with = "relay")]
+        no_relay: bool,
+        /// Use this self-hosted iroh-relay (HTTPS URL).
+        #[arg(long, value_name = "URL")]
+        relay: Option<String>,
+    },
+    /// SIGTERM a running daemon by topic hex (prefix-match accepted).
+    Stop {
+        /// Topic hex (full 64 chars or any unique prefix).
+        topic: String,
+    },
+    /// List running chat daemons (one line per daemon).
+    List,
 }
 
 #[derive(Subcommand)]
@@ -149,6 +197,16 @@ pub fn run(cli: Cli) -> Result<()> {
             HostBgCmd::List => host_bg::run_list(),
         },
         Command::HostBgDaemon { relay } => host_bg::run_daemon(relay.as_deref()),
+        Command::ChatDaemon { cmd } => match cmd {
+            ChatDaemonCmd::Start { ticket, no_relay, relay } => {
+                chat_daemon::run_start(&ticket, no_relay, relay.as_deref())
+            }
+            ChatDaemonCmd::Stop { topic } => chat_daemon::run_stop(&topic),
+            ChatDaemonCmd::List => chat_daemon::run_list(),
+        },
+        Command::ChatDaemonDaemon { ticket, no_relay, relay } => {
+            chat_daemon::run_daemon(&ticket, no_relay, relay.as_deref())
+        }
         Command::Doctor => doctor::run(),
     }
 }
