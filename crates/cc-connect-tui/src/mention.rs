@@ -36,8 +36,10 @@ pub fn current_at_token(input: &str) -> Option<&str> {
 }
 
 /// Filter `recent` (most-recent-first) by case-insensitive `starts_with`,
-/// excluding `self_nick` and the user's `<self_nick>-cc` alias (you don't
-/// @-mention yourself), then append broadcast tokens that match.
+/// excluding `self_nick` (you don't @-mention yourself), then append the
+/// user's own AI peer (`<self_nick>-cc`, synthetic — never lands in
+/// `recent` because the listener filters own-pubkey messages) and finally
+/// the broadcast tokens.
 pub fn mention_candidates<'a>(
     recent: &'a VecDeque<String>,
     prefix: &str,
@@ -45,17 +47,24 @@ pub fn mention_candidates<'a>(
 ) -> Vec<String> {
     let lower = prefix.to_ascii_lowercase();
     let self_lower = self_nick.map(|s| s.to_ascii_lowercase());
-    let self_cc = self_nick.map(|s| format!("{}-cc", s.to_ascii_lowercase()));
 
     let mut out: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // Synthetic: the user's own AI broadcasts as `<self_nick>-cc`, but its
+    // messages never land in `recent` (chat_session filters own-pubkey on
+    // the listener path), so without this it can't be @-mentioned at all.
+    if let Some(nick) = self_nick.filter(|s| !s.is_empty()) {
+        let own_ai = format!("{}-cc", nick);
+        let lower_own = own_ai.to_ascii_lowercase();
+        if lower_own.starts_with(&lower) && seen.insert(lower_own) {
+            out.push(own_ai);
+        }
+    }
+
     for nick in recent.iter() {
         let n_lower = nick.to_ascii_lowercase();
         if Some(&n_lower) == self_lower.as_ref() {
-            continue;
-        }
-        if Some(&n_lower) == self_cc.as_ref() {
             continue;
         }
         if !n_lower.starts_with(&lower) {
@@ -126,10 +135,42 @@ mod tests {
     }
 
     #[test]
-    fn candidates_skip_self_and_self_cc() {
-        let recent = nicks(&["YJ", "YJ-cc", "alice"]);
-        let got = mention_candidates(&recent, "", Some("YJ"));
-        assert_eq!(got, vec!["alice".to_string(), "cc".into(), "claude".into(), "all".into(), "here".into()]);
+    fn candidates_skip_self_but_keep_self_cc() {
+        // Bare `me` is the user themselves — drop it. `me-cc` is the user's
+        // own AI peer — keep it (and inject it synthetically up front so
+        // it shows even before the AI has spoken).
+        let recent = nicks(&["me", "me-cc", "peer"]);
+        let got = mention_candidates(&recent, "", Some("me"));
+        assert_eq!(
+            got,
+            vec![
+                "me-cc".to_string(),
+                "peer".into(),
+                "cc".into(),
+                "claude".into(),
+                "all".into(),
+                "here".into(),
+            ]
+        );
+    }
+
+    /// Own-AI peer is offered even when its messages haven't been recorded
+    /// (the steady state for the local user — listener filters own-pubkey).
+    #[test]
+    fn own_ai_synthetic_when_recent_empty() {
+        let recent = nicks(&[]);
+        let got = mention_candidates(&recent, "", Some("me"));
+        assert!(got.first().map(|s| s.as_str()) == Some("me-cc"), "got: {got:?}");
+    }
+
+    /// Synthetic own-AI candidate honours the in-progress prefix filter.
+    #[test]
+    fn own_ai_respects_prefix() {
+        let recent = nicks(&[]);
+        let got = mention_candidates(&recent, "me", Some("Me"));
+        assert_eq!(got, vec!["Me-cc".to_string()]);
+        let got = mention_candidates(&recent, "zz", Some("Me"));
+        assert!(!got.iter().any(|s| s == "Me-cc"), "should not match: {got:?}");
     }
 
     #[test]

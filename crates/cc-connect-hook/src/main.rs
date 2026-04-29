@@ -98,7 +98,10 @@ fn run() -> Result<()> {
     let output = if body.is_empty() {
         String::new()
     } else {
-        let header = build_orientation_header(&topic_ids, self_nick.as_deref());
+        let has_for_you = rooms.values().flatten().any(|m| {
+            hook_format::mentions_self(&m.body, self_nick.as_deref())
+        });
+        let header = build_orientation_header(&topic_ids, self_nick.as_deref(), has_for_you);
         format!("{header}{body}")
     };
 
@@ -283,13 +286,22 @@ fn read_nicknames() -> HashMap<String, String> {
 /// Per-prompt orientation block. Tells Claude what room it's in, what
 /// nick peers see, and which MCP tools exist. Without it Claude has to
 /// guess from the chat lines alone — and often guesses wrong.
-fn build_orientation_header(topic_ids: &[String], self_nick: Option<&str>) -> String {
+fn build_orientation_header(
+    topic_ids: &[String],
+    self_nick: Option<&str>,
+    has_for_you: bool,
+) -> String {
     if topic_ids.is_empty() {
         return String::new();
     }
+    // Peers see this Claude's broadcasts as `<self_nick>-cc` (the suffix is
+    // applied by chat_session for MCP-driven sends — it's how humans tell
+    // the AI apart from their teammate). The orientation line MUST reflect
+    // that suffixed nick, not the bare user nick, otherwise Claude
+    // misidentifies itself when @-mentions reference `<nick>-cc`.
     let nick_line = match self_nick {
-        Some(n) if !n.is_empty() => format!("you (this Claude) = {n}"),
-        _ => "you (this Claude) = anonymous (no self_nick set)".to_string(),
+        Some(n) if !n.is_empty() => format!("you (this Claude) = {n}-cc"),
+        _ => "you (this Claude) = anonymous-cc (no self_nick set)".to_string(),
     };
     let topics_line = topic_ids
         .iter()
@@ -301,7 +313,11 @@ fn build_orientation_header(topic_ids: &[String], self_nick: Option<&str>) -> St
     s.push_str(&format!("  topics: {topics_line}\n"));
     s.push_str(&format!("  {nick_line}\n"));
     s.push_str("  MCP tools you can call: cc_send(body), cc_at(nick, body), cc_drop(path), cc_recent(limit), cc_list_files(limit), cc_save_summary(text)\n");
-    s.push_str("  Lines below tagged [chatroom …] are unread chat messages from peers; mention them if relevant before answering the user.\n\n");
+    s.push_str("  Lines below tagged [chatroom …] are unread chat messages from peers; mention them if relevant before answering the user.\n");
+    if has_for_you {
+        s.push_str("  ⚠ One or more lines are tagged `for-you` (you were @-mentioned). You MUST reply in chat via cc_send (or cc_at for a directed reply) before — or in addition to — answering the user's prompt. Do not stay silent.\n");
+    }
+    s.push('\n');
     s
 }
 
@@ -454,5 +470,36 @@ mod tests {
         // Just exercises the function; we can't easily redirect HOME for a
         // unit test, but the helper falls back to {} on any error.
         let _ = read_nicknames();
+    }
+
+    /// Orientation header reflects the real outgoing nick (`<nick>-cc`)
+    /// peers see, not the bare user nick.
+    #[test]
+    fn orientation_header_uses_cc_suffix_for_self() {
+        let topics = vec!["a1b2c3d4e5f6".to_string()];
+        let s = build_orientation_header(&topics, Some("alice"), false);
+        assert!(s.contains("you (this Claude) = alice-cc"), "got:\n{s}");
+        assert!(!s.contains("you (this Claude) = alice\n"), "bare nick leaked: {s}");
+    }
+
+    /// When self_nick is unset the header still names the AI form.
+    #[test]
+    fn orientation_header_anonymous_keeps_cc_suffix() {
+        let topics = vec!["a1b2c3d4e5f6".to_string()];
+        let s = build_orientation_header(&topics, None, false);
+        assert!(s.contains("anonymous-cc"), "got:\n{s}");
+    }
+
+    /// for-you directive is injected when at least one message mentioned
+    /// us, so Claude reliably replies via cc_send instead of staying silent.
+    #[test]
+    fn orientation_header_emits_for_you_directive() {
+        let topics = vec!["a1b2c3d4e5f6".to_string()];
+        let with = build_orientation_header(&topics, Some("alice"), true);
+        assert!(with.contains("MUST reply"), "expected reply directive: {with}");
+        assert!(with.contains("`for-you`"), "expected tag reference: {with}");
+
+        let without = build_orientation_header(&topics, Some("alice"), false);
+        assert!(!without.contains("MUST reply"), "directive leaked: {without}");
     }
 }

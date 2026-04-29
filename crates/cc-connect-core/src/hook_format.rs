@@ -600,12 +600,12 @@ mod tests {
     /// is actually set.
     #[test]
     fn mentions_self_with_self_nick() {
-        assert!(mentions_self("hi @yijian", Some("yijian")));
-        assert!(mentions_self("hi @YIJIAN!", Some("yijian")));
-        assert!(!mentions_self("hi yijian", Some("yijian"))); // no @
-        assert!(!mentions_self("hi @bob", Some("yijian")));
-        assert!(!mentions_self("@yijian", None)); // self_nick missing → no match
-        assert!(!mentions_self("@yijian", Some(""))); // empty → ignored
+        assert!(mentions_self("hi @alice", Some("alice")));
+        assert!(mentions_self("hi @ALICE!", Some("alice")));
+        assert!(!mentions_self("hi alice", Some("alice"))); // no @
+        assert!(!mentions_self("hi @bob", Some("alice")));
+        assert!(!mentions_self("@alice", None)); // self_nick missing → no match
+        assert!(!mentions_self("@alice", Some(""))); // empty → ignored
     }
 
     /// When the body mentions the receiver, the rendered prefix gains a
