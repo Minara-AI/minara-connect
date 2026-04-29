@@ -1,0 +1,55 @@
+name: Feature request
+description: Propose a new capability or a substantive change.
+title: "[feat]: "
+labels:
+  - needs-triage
+  - kind:feature
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For larger changes — anything touching the wire format, identity,
+        or threat model — please open the issue first and let's agree on
+        an approach before code lands. The maintainers will tell you if
+        the change needs an ADR.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the user-visible problem before proposing a solution. "I want X" is fine; "X because Y" is better.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: A sketch is plenty — wire shape, command surface, UX. Don't write code yet.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you think about, and why is your proposal better?
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface does this touch?
+      multiple: true
+      options:
+        - core (gossip, identity, log.jsonl)
+        - hook (UserPromptSubmit injection)
+        - mcp (MCP server tools)
+        - tui (terminal UI)
+        - chat-ui (Bun + Ink chat panel)
+        - install / packaging
+        - protocol (wire format — needs ADR)
+        - security (threat model — needs SECURITY.md update)
+        - docs
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?

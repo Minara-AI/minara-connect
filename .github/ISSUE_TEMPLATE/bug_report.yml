@@ -1,0 +1,85 @@
+name: Bug report
+description: Something doesn't work the way it should.
+title: "[bug]: "
+labels:
+  - needs-triage
+  - kind:bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Before you continue:
+
+        - **Security issues** → please use the [private advisory form](https://github.com/Minara-AI/cc-connect/security/advisories/new) instead.
+        - For environment + install issues, run `cc-connect doctor` first and paste its output below — it covers most of what we'd ask anyway.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: One paragraph. What did you do, what did you expect, what did you get instead?
+      placeholder: |
+        I started a Room with `cc-connect room start`. After my partner joined,
+        their messages didn't show up in my Claude's prompt context.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Smallest possible recipe. Commands, files, screenshots — whichever is shortest.
+      placeholder: |
+        1. `cc-connect room start`
+        2. Have peer B join with the printed ticket.
+        3. B types `hello` in the chat pane.
+        4. A's next prompt to Claude does not include the message.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: cc-connect doctor output
+      description: Paste the output of `./target/release/cc-connect doctor`.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: cc-connect version / commit
+      description: Output of `cc-connect --version` or the commit you built from.
+      placeholder: "v0.4.3-alpha or git sha"
+    validations:
+      required: true
+
+  - type: input
+    id: rustc
+    attributes:
+      label: rustc version
+      placeholder: "rustc 1.85.0 (xxxxxxx 2025-mm-dd)"
+
+  - type: input
+    id: bun
+    attributes:
+      label: bun version (only if chat-ui is involved)
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - Other (please describe in the notes)
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Logs, hypotheses, things you already tried.

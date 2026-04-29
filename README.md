@@ -321,13 +321,25 @@ If `cc-connect-hook` fired but you suspect it failed, check `~/.cc-connect/hook.
 cc-connect/
 ├── PROTOCOL.md              v0.1 wire-and-disk specification
 ├── CONTEXT.md               Domain glossary (DDD-style)
-├── docs/adr/                Architecture decision records (1-4)
+├── SECURITY.md              Threat model
+├── CLAUDE.md                Agent guide for Claude Code sessions in this repo
+├── docs/
+│   ├── adr/                 Architecture decision records (1-4)
+│   └── agents/              Per-repo config the engineering skills consume
 ├── crates/
 │   ├── cc-connect-core/     Protocol primitives library (74 tests)
 │   ├── cc-connect/          host / chat / room / host-bg / doctor binary
 │   ├── cc-connect-tui/      TUI binary (cc-connect-tui) + library
 │   ├── cc-connect-mcp/      MCP stdio server (Claude Code → chat tools)
 │   └── cc-connect-hook/     UserPromptSubmit hook binary
+├── chat-ui/                 Bun + React + Ink chat panel (→ cc-chat-ui)
+├── .claude/skills/          Project-local Claude Code skills
+├── .githooks/               Polyglot pre-commit + commit-msg hooks
+├── .github/                 CI, release, issue + PR templates
+├── scripts/
+│   ├── install-git-hooks.sh Contributor onboarding (sets core.hooksPath)
+│   ├── configure-repo.sh    One-shot GitHub repo settings (admin only)
+│   └── smoke-test*.sh       End-to-end verification
 ├── tests/                   FAKE-CLAUDE-CODE integration test
 ├── vendored/                Patched ed25519 + ed25519-dalek (temporary,
 │                            see TODOS.md and curve25519-dalek#901)
@@ -338,8 +350,12 @@ cc-connect/
 
 ## Status / contributing
 
-v0.1 is feature-complete in commits but un-released because of the upstream `ed25519` RC issue. See [`TODOS.md`](./TODOS.md) for the upstream tracker and removal procedure.
+v0.1 is feature-complete in commits but un-released because of the upstream `ed25519` RC issue. See [`TODOS.md`](./TODOS.md) for the upstream tracker and removal procedure. Current cadence: protocol-first, every wire-format detail in PROTOCOL.md, tests are byte-exact where it matters.
 
-Current cadence: protocol-first, every wire-format detail in PROTOCOL.md, tests are byte-exact where it matters.
+Want to contribute? Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the dev setup, commit conventions, and PR checklist. The [`CONTEXT.md`](./CONTEXT.md) glossary is load-bearing — domain terms in the codebase must match it. Architectural decisions get an [ADR](./docs/adr/); wire-format changes get a `v` bump per [`PROTOCOL.md`](./PROTOCOL.md).
 
-Issues and PRs welcome on the private repo.
+Bugs and feature requests: [GitHub Issues](https://github.com/Minara-AI/cc-connect/issues/new/choose). Security: [private advisory](https://github.com/Minara-AI/cc-connect/security/advisories/new), not a public issue ([`SECURITY.md`](./SECURITY.md)).
+
+## License
+
+Dual-licensed under [MIT](./LICENSE-MIT) **OR** [Apache-2.0](./LICENSE-APACHE) at your option. Contributions are accepted under the same dual license; there is no separate CLA. Participants in project spaces are expected to follow the [Code of Conduct](./CODE_OF_CONDUCT.md).

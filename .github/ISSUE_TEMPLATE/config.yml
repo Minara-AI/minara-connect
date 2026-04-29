@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Minara-AI/cc-connect/security/advisories/new
+    about: Please report security issues privately, not as public issues. See SECURITY.md for the threat model.
+  - name: Question or discussion
+    url: https://github.com/Minara-AI/cc-connect/discussions
+    about: For open-ended questions, ideas, and design conversations.

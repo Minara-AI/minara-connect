@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# cc-connect pre-commit hook.
+#
+# Polyglot repo (Rust workspace + Bun chat-ui). We dispatch by what's
+# actually staged so a Rust-only contributor never needs Bun installed,
+# and vice versa.
+#
+# Bypass with `git commit --no-verify` (use sparingly — CI runs the same
+# checks and will reject the PR anyway).
+
+set -euo pipefail
+
+# All paths in the staged index, NUL-delimited so spaces are safe.
+# (`mapfile -d ''` is bash 4+; macOS ships bash 3.2 by default — use a loop.)
+staged=()
+while IFS= read -r -d '' f; do
+  staged+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+
+if [ ${#staged[@]} -eq 0 ]; then
+  exit 0
+fi
+
+has_rust=0
+has_chatui=0
+for f in "${staged[@]}"; do
+  case "$f" in
+    *.rs|Cargo.toml|Cargo.lock|crates/*) has_rust=1 ;;
+    chat-ui/*) has_chatui=1 ;;
+  esac
+done
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+fail=0
+
+if [ $has_rust -eq 1 ]; then
+  echo "[pre-commit] rustfmt --check"
+  if ! cargo fmt --all -- --check; then
+    echo "[pre-commit] rustfmt failed. Run: cargo fmt --all" >&2
+    fail=1
+  fi
+
+  echo "[pre-commit] cargo clippy (workspace, -D warnings)"
+  if ! cargo clippy --workspace --all-targets --tests --quiet -- -D warnings; then
+    echo "[pre-commit] clippy failed. Fix the lints above (or justify with #[allow])." >&2
+    fail=1
+  fi
+fi
+
+if [ $has_chatui -eq 1 ]; then
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "[pre-commit] chat-ui changes staged but \`bun\` is not installed." >&2
+    echo "[pre-commit] Install bun (https://bun.com) or remove chat-ui/* from the commit." >&2
+    fail=1
+  else
+    echo "[pre-commit] chat-ui: bunx tsc --noEmit"
+    if ! (cd chat-ui && bunx tsc --noEmit); then
+      fail=1
+    fi
+    echo "[pre-commit] chat-ui: prettier --check on staged files"
+    chatui_staged=()
+    for f in "${staged[@]}"; do
+      case "$f" in chat-ui/*) chatui_staged+=("$f") ;; esac
+    done
+    if [ ${#chatui_staged[@]} -gt 0 ]; then
+      if ! (cd chat-ui && bunx --bun prettier --check "${chatui_staged[@]/#chat-ui\//}"); then
+        echo "[pre-commit] prettier failed. Run: (cd chat-ui && bunx prettier --write .)" >&2
+        fail=1
+      fi
+    fi
+  fi
+fi
+
+if [ $fail -ne 0 ]; then
+  echo "[pre-commit] one or more checks failed; commit aborted." >&2
+  exit 1
+fi

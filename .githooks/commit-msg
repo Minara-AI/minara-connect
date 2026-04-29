@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# cc-connect commit-msg hook.
+#
+# Enforces Conventional Commits: `type(scope): subject` or `type: subject`.
+# Allowed types: feat, fix, chore, docs, refactor, test, perf, build, ci, revert.
+# Merge / revert / fixup commits are allowed through as-is.
+
+set -euo pipefail
+
+msg_file="$1"
+first_line="$(head -n1 "$msg_file")"
+
+# Pass-through for git's own machinery.
+case "$first_line" in
+  Merge\ *|Revert\ *|fixup!\ *|squash!\ *|amend!\ *) exit 0 ;;
+esac
+
+# type(optional-scope)!? : subject
+# - subject must start with a non-space char
+# - subject length <= 72 chars (header total <= ~100)
+pattern='^(feat|fix|chore|docs|refactor|test|perf|build|ci|revert)(\([a-zA-Z0-9_,.\/-]+\))?!?: [^ ].{0,71}$'
+
+if [[ ! "$first_line" =~ $pattern ]]; then
+  cat >&2 <<EOF
+[commit-msg] subject does not match Conventional Commits.
+
+Got: $first_line
+
+Expected: <type>(<scope>)?: <subject>
+  type    feat | fix | chore | docs | refactor | test | perf | build | ci | revert
+  scope   optional, lowercase, comma-separated for multi-area changes
+  subject imperative mood, lower-case, no trailing period, ≤72 chars
+
+Examples:
+  feat(hook): inject \`for-you\` tag for @-mentions
+  fix(mcp): write to ~/.claude.json so Claude Code picks up the server
+  docs(security): add threat model with README pointer
+  chore(install,setup): detect multiplexer + bun, build chat-ui
+
+Bypass: git commit --no-verify (only when truly necessary).
+EOF
+  exit 1
+fi
