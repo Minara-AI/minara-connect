@@ -175,7 +175,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "cc_wait_for_mention",
-            "description": "Block until a peer @-mentions you in the bound room (or until the timeout). This is the ambient-listener entry point: after replying to the user (or after handling one mention), call this tool again immediately so a new mention wakes you the moment it arrives. Pass `since_id` from the previous response's `mention.id` to pick up any mention that landed between two calls (the server keeps a 32-entry buffer). Returns `{mention: {id, ts, nick, body}, reason: \"received\"|\"buffered\"}` on a hit, or `{mention: null, reason: \"timeout\"|\"lagged\"}` so you can re-arm. After a hit, decide whether to reply via cc_send / cc_at, then re-arm with `since_id = mention.id`.",
+            "description": "Block until a peer @-mentions you in the bound room (or until timeout). Ambient-listener entry point — after each return, call this tool again immediately so a new mention wakes you. Returns the mention as compact JSON `{id, ts, nick, body}` on a hit, or the literal string `null` on timeout/lagged. After a hit, decide whether to reply via cc_send / cc_at, then re-arm with `since_id = id`. After `null`, re-arm immediately without changing `since_id`. The server keeps a 32-entry ring buffer so events that arrive between two calls aren't lost; pass `since_id` from the previous hit to pick them up.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -257,33 +257,19 @@ async fn call_tool(name: &str, args: Value) -> Result<String> {
                 payload["since_id"] = json!(s);
             }
             let resp = ipc_call(payload).await?;
-            // Pass the structured result through verbatim — Claude reads
-            // both the human-readable summary line AND the JSON to decide
-            // what to do next (reply via cc_send / cc_at, or re-arm).
-            let pretty = serde_json::to_string_pretty(&resp).unwrap_or_default();
-            let summary = match resp.get("mention") {
+            // Compact response: hit → JSON of the mention object; miss
+            // (timeout / lagged / closed) → the literal string `null`.
+            // Designed for the ambient listener loop — keeping each cycle
+            // ~4 bytes lets claude re-arm indefinitely without bloating
+            // conversation context. The system prompt installed by
+            // `cc-connect room start` (layouts/auto-reply-prompt.md) tells
+            // claude how to interpret this.
+            match resp.get("mention") {
                 Some(m) if !m.is_null() => {
-                    let nick = m.get("nick").and_then(|x| x.as_str()).unwrap_or("?");
-                    let body = m.get("body").and_then(|x| x.as_str()).unwrap_or("");
-                    let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("?");
-                    format!(
-                        "@-mention from {nick} (id={id}): {body}\n\n\
-                         Reply via cc_send / cc_at if appropriate, then call \
-                         cc_wait_for_mention again with since_id={id} to re-arm."
-                    )
+                    Ok(serde_json::to_string(m).unwrap_or_else(|_| "null".to_string()))
                 }
-                _ => {
-                    let reason = resp
-                        .get("reason")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("timeout");
-                    format!(
-                        "no mention this window (reason={reason}). \
-                         Re-arm by calling cc_wait_for_mention again."
-                    )
-                }
-            };
-            Ok(format!("{summary}\n\n---\n{pretty}"))
+                _ => Ok("null".to_string()),
+            }
         }
         other => bail!("unknown tool: {other}"),
     }

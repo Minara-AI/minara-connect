@@ -3,15 +3,20 @@
 // shell (the cc-connect launcher exports it before exec'ing zellij), so
 // claude's hook fires correctly and chat-ui finds the right chat.sock.
 //
+// `__CLAUDE_WRAPPER__` is substituted at launch by room.rs to the path
+// of `claude-wrap.sh` (a thin shim that prepends `--append-system-prompt
+// "$(cat $CC_CONNECT_AUTO_REPLY_FILE)"` if the room launcher wrote that
+// file). This is what arms the cc_wait_for_mention auto-reply loop.
+//
 // Embedded into the cc-connect binary via include_str! so the launcher
 // doesn't depend on a layouts/ install path.
 layout {
     pane split_direction="vertical" {
         pane size="60%" {
-            command "claude"
+            command "__CLAUDE_WRAPPER__"
         }
         pane size="40%" {
-            command "cc-chat-ui"
+            command "__CC_CHAT_UI_BIN__"
         }
     }
 }

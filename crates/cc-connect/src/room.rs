@@ -29,6 +29,8 @@ use cc_connect_core::ticket::decode_room_code;
 
 const ZELLIJ_LAYOUT: &str = include_str!("../../../layouts/cc-connect.kdl");
 const TMUX_LAUNCHER: &str = include_str!("../../../layouts/cc-connect.tmux.sh");
+const CLAUDE_WRAPPER_SH: &str = include_str!("../../../layouts/claude-wrap.sh");
+const AUTO_REPLY_PROMPT: &str = include_str!("../../../layouts/auto-reply-prompt.md");
 
 #[derive(Debug, Clone, Copy)]
 enum Multiplexer {
@@ -38,22 +40,23 @@ enum Multiplexer {
     None,
 }
 
-pub fn run_start(
-    relay: Option<&str>,
-    nick: Option<&str>,
-    claude_args: &[String],
-) -> Result<()> {
+pub fn run_start(relay: Option<&str>, nick: Option<&str>, claude_args: &[String]) -> Result<()> {
     setup_wizard(nick)?;
     let resolved_relay = crate::setup::ensure_relay_choice(relay).unwrap_or_else(|e| {
         eprintln!("(setup: relay prompt failed: {e:#}; defaulting to n0)");
         None
     });
 
-    let ticket = spawn_host_bg(resolved_relay.as_deref())
-        .context("spawn host-bg start to mint a ticket")?;
+    let ticket =
+        spawn_host_bg(resolved_relay.as_deref()).context("spawn host-bg start to mint a ticket")?;
     println!("[room] daemon started, joining…");
 
-    launch_room(&ticket, resolved_relay.as_deref(), claude_args, /* hosting */ true)
+    launch_room(
+        &ticket,
+        resolved_relay.as_deref(),
+        claude_args,
+        /* hosting */ true,
+    )
 }
 
 pub fn run_join(
@@ -92,9 +95,7 @@ fn launch_room(
             // Don't start chat-daemon — both binding chat.sock for the same
             // topic would conflict, and the gossip mesh would see the same
             // identity from two processes.
-            eprintln!(
-                "! note: zellij and tmux not found — falling back to embedded TUI."
-            );
+            eprintln!("! note: zellij and tmux not found — falling back to embedded TUI.");
             eprintln!("! install one of:");
             eprintln!("!   brew install zellij    # macOS (recommended)");
             eprintln!("!   apt install tmux       # debian/ubuntu");
@@ -150,9 +151,7 @@ fn spawn_host_bg(relay: Option<&str>) -> Result<String> {
                 .find(|w| w.starts_with("cc1-"))
                 .map(|s| s.to_string())
         })
-        .ok_or_else(|| {
-            anyhow!("host-bg start did not print a ticket; output was:\n{stdout}")
-        })
+        .ok_or_else(|| anyhow!("host-bg start did not print a ticket; output was:\n{stdout}"))
 }
 
 // ---- chat-daemon idempotent start --------------------------------------
@@ -161,11 +160,7 @@ fn spawn_host_bg(relay: Option<&str>) -> Result<String> {
 /// is itself idempotent (prints `ALREADY <topic> <pid>` if a live daemon
 /// owns the same topic), so we just shell out to ourselves and let it
 /// figure it out.
-fn ensure_chat_daemon(
-    ticket: &str,
-    no_relay: bool,
-    relay: Option<&str>,
-) -> Result<()> {
+fn ensure_chat_daemon(ticket: &str, no_relay: bool, relay: Option<&str>) -> Result<()> {
     let cc_connect = locate_self_bin()?;
     let mut cmd = Command::new(&cc_connect);
     cmd.arg("chat-daemon").arg("start").arg(ticket);
@@ -208,18 +203,39 @@ fn detect_multiplexer() -> Multiplexer {
 
 fn exec_zellij(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
     // Materialise the layout to a tmpfile so zellij --layout can pick it
-    // up. The layout is static (no per-topic substitution); chat-ui +
-    // claude both inherit CC_CONNECT_ROOM from our env.
-    let layout_path = write_tmp_layout("cc-connect", "kdl", ZELLIJ_LAYOUT)?;
+    // up. Two substitutions:
+    //   __CC_CHAT_UI_BIN__   → absolute path to cc-chat-ui next to our own
+    //                          binary (without this zellij does a bare PATH
+    //                          lookup and panics if the binary isn't there).
+    //   __CLAUDE_WRAPPER__   → absolute path to the claude-wrap.sh shim
+    //                          (which prepends --append-system-prompt with
+    //                          the auto-reply directive when present).
+    let chat_ui_bin = locate_chat_ui_bin()?;
+    let claude_wrapper = prepare_claude_wrapper()?;
+    let auto_reply = prepare_auto_reply_prompt()?;
+
+    let layout_kdl = ZELLIJ_LAYOUT
+        .replace("__CC_CHAT_UI_BIN__", &chat_ui_bin.to_string_lossy())
+        .replace("__CLAUDE_WRAPPER__", &claude_wrapper.to_string_lossy());
+    let layout_path = write_tmp_layout("cc-connect", "kdl", &layout_kdl)?;
     let session_short = topic_hex
         .chars()
         .take(12.min(topic_hex.len()))
         .collect::<String>();
 
+    // Use -n / --new-session-with-layout (NOT --layout + --session): with
+    // --session set, plain --layout treats the layout as "add tabs to that
+    // session" and errors with "There is no active session!" when the session
+    // doesn't exist yet. -n forces "create new session with this layout"
+    // unconditionally.
     let mut cmd = Command::new("zellij");
-    cmd.arg("--layout").arg(&layout_path);
-    cmd.arg("--session").arg(format!("cc-connect-{session_short}"));
+    cmd.arg("--session")
+        .arg(format!("cc-connect-{session_short}"));
+    cmd.arg("-n").arg(&layout_path);
     cmd.env("CC_CONNECT_ROOM", topic_hex);
+    if let Some(p) = auto_reply {
+        cmd.env("CC_CONNECT_AUTO_REPLY_FILE", &p);
+    }
 
     // claude_args (e.g. `--model opus`) go into the embedded claude. We
     // can't push them through zellij's KDL `args` from the Rust side
@@ -232,7 +248,12 @@ fn exec_zellij(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
 }
 
 fn exec_tmux(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
-    let script_path = write_tmp_layout("cc-connect", "tmux.sh", TMUX_LAUNCHER)?;
+    let claude_wrapper = prepare_claude_wrapper()?;
+    let auto_reply = prepare_auto_reply_prompt()?;
+
+    let tmux_script =
+        TMUX_LAUNCHER.replace("__CLAUDE_WRAPPER__", &claude_wrapper.to_string_lossy());
+    let script_path = write_tmp_layout("cc-connect", "tmux.sh", &tmux_script)?;
     // Make it executable.
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
@@ -240,8 +261,58 @@ fn exec_tmux(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
     let mut cmd = Command::new("bash");
     cmd.arg(&script_path);
     cmd.env("CC_CONNECT_ROOM", topic_hex);
+    if let Some(p) = auto_reply {
+        cmd.env("CC_CONNECT_AUTO_REPLY_FILE", &p);
+    }
     let err = cmd.exec();
     Err(anyhow!("exec tmux launcher failed: {err}"))
+}
+
+/// Per-UID temp directory used for ephemeral, machine-local state shared
+/// between the cc-connect launcher, the claude wrapper script, and the
+/// chat-ui pane. Mirrors the `/tmp/cc-connect-$UID/` convention used by
+/// `chat_session::pid_file_path` for active-rooms PID files.
+fn cc_connect_tmp_dir() -> PathBuf {
+    let uid = rustix::process::geteuid().as_raw();
+    std::env::temp_dir().join(format!("cc-connect-{uid}"))
+}
+
+/// Write `claude-wrap.sh` into `/tmp/cc-connect-$UID/`, chmod 0700,
+/// idempotent on every call. The wrapper is the actual binary spawned by
+/// the multiplexer; it picks up `--append-system-prompt` from the
+/// auto-reply file if one is present, else exec's plain claude.
+fn prepare_claude_wrapper() -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = cc_connect_tmp_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create_dir_all {}", dir.display()))?;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    let path = dir.join("claude-wrap.sh");
+    std::fs::write(&path, CLAUDE_WRAPPER_SH)
+        .with_context(|| format!("write {}", path.display()))?;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+    Ok(path)
+}
+
+/// Write the auto-reply system-prompt directive into
+/// `/tmp/cc-connect-$UID/auto-reply.md` and return the path. Returns
+/// `Ok(None)` if the user has opted out via `CC_CONNECT_NO_AUTO_REPLY=1`
+/// — the wrapper script then falls through to plain claude.
+fn prepare_auto_reply_prompt() -> Result<Option<PathBuf>> {
+    if std::env::var_os("CC_CONNECT_NO_AUTO_REPLY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let dir = cc_connect_tmp_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create_dir_all {}", dir.display()))?;
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    let path = dir.join("auto-reply.md");
+    std::fs::write(&path, AUTO_REPLY_PROMPT)
+        .with_context(|| format!("write {}", path.display()))?;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    Ok(Some(path))
 }
 
 fn exec_tui_fallback(
@@ -292,6 +363,26 @@ fn locate_tui_bin() -> Result<PathBuf> {
     Ok(tui)
 }
 
+fn locate_chat_ui_bin() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("current_exe")?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| anyhow!("current_exe has no parent: {}", exe.display()))?;
+    let bin = dir.join("cc-chat-ui");
+    if bin.exists() {
+        return Ok(bin);
+    }
+    // Fallback: PATH lookup, in case the user installed the binary system-wide.
+    if let Some(p) = which("cc-chat-ui") {
+        return Ok(p);
+    }
+    bail!(
+        "cc-chat-ui binary not found at {} or on $PATH — \
+         run `cd chat-ui && bun run build` or `./install.sh`",
+        bin.display()
+    )
+}
+
 fn which(cmd: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
@@ -320,8 +411,8 @@ fn write_tmp_layout(stem: &str, ext: &str, contents: &str) -> Result<PathBuf> {
 }
 
 fn decode_topic_hex(ticket: &str) -> Result<String> {
-    let bytes = decode_room_code(ticket)
-        .with_context(|| format!("decode room code: {:.20}…", ticket))?;
+    let bytes =
+        decode_room_code(ticket).with_context(|| format!("decode room code: {:.20}…", ticket))?;
     let payload = TicketPayload::from_bytes(&bytes)?;
     let mut out = String::with_capacity(64);
     for b in payload.topic.as_bytes() {
@@ -330,4 +421,3 @@ fn decode_topic_hex(ticket: &str) -> Result<String> {
     }
     Ok(out)
 }
-
