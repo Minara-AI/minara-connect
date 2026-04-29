@@ -90,6 +90,69 @@ pub fn line_mentions_me(body: &str, self_nick: Option<&str>) -> bool {
     false
 }
 
+/// One @-mention event, surfaced by the gossip listener and consumable by
+/// `cc_wait_for_mention` (IPC action `wait_for_mention`). Serialised
+/// straight into the IPC response so cc-connect-mcp can hand it back to
+/// Claude verbatim.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MentionEvent {
+    pub id: String,
+    pub ts: i64,
+    pub nick: String,
+    pub body: String,
+}
+
+/// Capacity of the recent-mentions ring buffer + the broadcast channel.
+/// Sized so a Claude that's slow re-arming `cc_wait_for_mention` doesn't
+/// lose events delivered between two calls.
+const MENTION_BUFFER_CAP: usize = 32;
+
+/// Shared state for the wait_for_mention IPC action: a broadcast channel
+/// that wakes any waiter the moment a mention lands, plus a small ring
+/// buffer that lets a re-arming caller (with a `since_id` watermark) pick
+/// up mentions that arrived between two calls.
+pub(crate) struct MentionState {
+    tx: tokio::sync::broadcast::Sender<MentionEvent>,
+    recent: std::sync::Mutex<std::collections::VecDeque<MentionEvent>>,
+}
+
+impl MentionState {
+    fn new() -> std::sync::Arc<Self> {
+        let (tx, _) = tokio::sync::broadcast::channel(MENTION_BUFFER_CAP);
+        std::sync::Arc::new(Self {
+            tx,
+            recent: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
+                MENTION_BUFFER_CAP,
+            )),
+        })
+    }
+
+    /// Record an @-mention. Buffer cap-evicts oldest; broadcast send is
+    /// best-effort (no waiters → ignored).
+    fn push(&self, ev: MentionEvent) {
+        {
+            let mut buf = self.recent.lock().expect("mention buffer poisoned");
+            if buf.len() >= MENTION_BUFFER_CAP {
+                buf.pop_front();
+            }
+            buf.push_back(ev.clone());
+        }
+        let _ = self.tx.send(ev);
+    }
+
+    /// Find the oldest buffered mention strictly newer than `cutoff` (by
+    /// ULID lex comparison, which matches chronological order). Returns
+    /// `None` if `cutoff` is `None` (the caller wants only new events,
+    /// not buffered replay) or if the buffer holds nothing newer.
+    fn snapshot_after(&self, cutoff: Option<&str>) -> Option<MentionEvent> {
+        let cutoff = cutoff?;
+        let buf = self.recent.lock().expect("mention buffer poisoned");
+        buf.iter()
+            .find(|e| e.id.as_str() > cutoff)
+            .cloned()
+    }
+}
+
 /// Handle returned from [`spawn`].
 pub struct ChatHandle {
     /// Read display lines from the session (chat scrollback).
@@ -231,6 +294,10 @@ async fn run_session(
     let pid_path = pid_file_path(&topic_id_hex)?;
     let _pid_guard = PidFileGuard::new(&pid_path)?;
 
+    // 8.0. Mention state for the `wait_for_mention` IPC action — shared
+    // between the gossip listener (producer) and IPC handlers (consumers).
+    let mention_state = MentionState::new();
+
     // 8.5. IPC unix-socket server. Lets cc-connect-mcp (and any other
     //      local helper) drive this session — sending chat lines on
     //      Claude Code's behalf, querying recent log, etc.
@@ -256,8 +323,16 @@ async fn run_session(
         let mcp_input_tx = mcp_input_tx.clone();
         let ipc_log_path = log_path.clone();
         let ipc_files_dir = files_dir_for(&topic_id_hex);
+        let ipc_mention_state = mention_state.clone();
         Some(tokio::spawn(async move {
-            ipc_server_loop(listener, mcp_input_tx, ipc_log_path, ipc_files_dir).await
+            ipc_server_loop(
+                listener,
+                mcp_input_tx,
+                ipc_log_path,
+                ipc_files_dir,
+                ipc_mention_state,
+            )
+            .await
         }))
     } else {
         None
@@ -383,6 +458,12 @@ async fn run_session(
             } else {
                 msg.body.replace(['\n', '\r', '\t'], " ")
             };
+            // mentions_me here is purely the VISUAL flag (UI styles peer
+            // @-mentions in red and tags them `(@me)` so the user can see
+            // someone tried to reach their AI). It is intentionally NOT a
+            // wake signal — under the owner-only rule, peer @-mentions
+            // must not auto-trigger our embedded Claude. Owner-driven
+            // wake-ups are pushed from the send path instead.
             let mentions_me = line_mentions_me(&body, listener_self_nick.as_deref());
             let _ = listener_display
                 .send(DisplayLine::Incoming {
@@ -477,6 +558,23 @@ async fn run_session(
                 .send(DisplayLine::Warn(format!("[chat] append outgoing failed: {e:#}")))
                 .await;
             continue;
+        }
+        // Owner @-mention wake-up: only the human user typing into chat
+        // (InputSource::Local) addressing their own AI counts as a wake
+        // signal for `cc_wait_for_mention`. Peer messages are excluded
+        // upstream (listener no longer pushes), and the AI's own MCP-driven
+        // sends are excluded here — otherwise an `@cc` in the AI's own
+        // broadcast would self-trigger an infinite loop.
+        if matches!(source, InputSource::Local)
+            && msg.kind != cc_connect_core::message::KIND_FILE_DROP
+            && line_mentions_me(&msg.body, self_nick.as_deref())
+        {
+            mention_state.push(MentionEvent {
+                id: msg.id.clone(),
+                ts: msg.ts,
+                nick: echo_nick.clone(),
+                body: msg.body.clone(),
+            });
         }
         // INDEX.md append for our own file_drops (best-effort).
         if msg.kind == cc_connect_core::message::KIND_FILE_DROP {
@@ -802,6 +900,7 @@ async fn ipc_server_loop(
     input_tx: mpsc::Sender<String>,
     log_path: PathBuf,
     files_dir: PathBuf,
+    mention_state: std::sync::Arc<MentionState>,
 ) {
     loop {
         let (stream, _) = match listener.accept().await {
@@ -811,8 +910,9 @@ async fn ipc_server_loop(
         let input_tx = input_tx.clone();
         let log_path = log_path.clone();
         let files_dir = files_dir.clone();
+        let mention_state = mention_state.clone();
         tokio::spawn(async move {
-            handle_ipc_client(stream, input_tx, log_path, files_dir).await
+            handle_ipc_client(stream, input_tx, log_path, files_dir, mention_state).await
         });
     }
 }
@@ -822,6 +922,7 @@ async fn handle_ipc_client(
     input_tx: mpsc::Sender<String>,
     log_path: PathBuf,
     files_dir: PathBuf,
+    mention_state: std::sync::Arc<MentionState>,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (read_half, mut write_half) = stream.into_split();
@@ -836,7 +937,7 @@ async fn handle_ipc_client(
         if n == 0 {
             return;
         }
-        let resp = dispatch_ipc(&line, &input_tx, &log_path, &files_dir).await;
+        let resp = dispatch_ipc(&line, &input_tx, &log_path, &files_dir, &mention_state).await;
         let mut out = serde_json::to_vec(&resp).unwrap_or_else(|_| b"{\"ok\":false,\"err\":\"encode\"}".to_vec());
         out.push(b'\n');
         if write_half.write_all(&out).await.is_err() {
@@ -854,11 +955,19 @@ struct IpcResponse {
     data: Option<serde_json::Value>,
 }
 
+/// Hard cap on `wait_for_mention` block time, mirrors a sane MCP tool call
+/// budget: long enough that Claude isn't woken twice a minute on quiet
+/// rooms, short enough that a stuck call recovers without an obvious
+/// hang. Claude re-arms on each return.
+const WAIT_FOR_MENTION_MAX_MS: u64 = 600_000;
+const WAIT_FOR_MENTION_DEFAULT_MS: u64 = 300_000;
+
 async fn dispatch_ipc(
     raw: &str,
     input_tx: &mpsc::Sender<String>,
     log_path: &Path,
     files_dir: &Path,
+    mention_state: &std::sync::Arc<MentionState>,
 ) -> IpcResponse {
     let v: serde_json::Value = match serde_json::from_str(raw.trim()) {
         Ok(v) => v,
@@ -971,6 +1080,68 @@ async fn dispatch_ipc(
                     ok: false,
                     err: Some(format!("{e:#}")),
                     data: None,
+                },
+            }
+        }
+        "wait_for_mention" => {
+            let since_id = v
+                .get("since_id")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            let timeout_ms = v
+                .get("timeout_ms")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(WAIT_FOR_MENTION_DEFAULT_MS)
+                .min(WAIT_FOR_MENTION_MAX_MS);
+
+            // Subscribe BEFORE scanning the buffer so any event arriving
+            // between the buffer scan and the await is delivered through rx.
+            let mut rx = mention_state.tx.subscribe();
+
+            // Buffered replay: caller has a watermark and there are events
+            // newer than it sitting in the ring. Return immediately.
+            if let Some(ev) = mention_state.snapshot_after(since_id.as_deref()) {
+                return IpcResponse {
+                    ok: true,
+                    err: None,
+                    data: Some(serde_json::json!({
+                        "mention": ev,
+                        "reason": "buffered",
+                    })),
+                };
+            }
+
+            let timeout = std::time::Duration::from_millis(timeout_ms);
+            match tokio::time::timeout(timeout, rx.recv()).await {
+                Ok(Ok(ev)) => IpcResponse {
+                    ok: true,
+                    err: None,
+                    data: Some(serde_json::json!({
+                        "mention": ev,
+                        "reason": "received",
+                    })),
+                },
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => IpcResponse {
+                    ok: true,
+                    err: None,
+                    data: Some(serde_json::json!({
+                        "mention": null,
+                        "reason": "lagged",
+                        "skipped": n,
+                    })),
+                },
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => IpcResponse {
+                    ok: false,
+                    err: Some("BROADCAST_CLOSED".into()),
+                    data: None,
+                },
+                Err(_elapsed) => IpcResponse {
+                    ok: true,
+                    err: None,
+                    data: Some(serde_json::json!({
+                        "mention": null,
+                        "reason": "timeout",
+                    })),
                 },
             }
         }
@@ -1098,5 +1269,86 @@ impl PidFileGuard {
 impl Drop for PidFileGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod mention_state_tests {
+    use super::*;
+
+    fn ev(id: &str, body: &str) -> MentionEvent {
+        MentionEvent {
+            id: id.to_string(),
+            ts: 0,
+            nick: "alice".to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    /// `snapshot_after(None)` MUST return None even with a populated buffer.
+    /// Rationale: the very-first `cc_wait_for_mention` call carries no
+    /// watermark; we don't want to replay events the hook already injected.
+    #[test]
+    fn snapshot_returns_none_when_no_cutoff_supplied() {
+        let st = MentionState::new();
+        st.push(ev("01H0000000000000000000000A", "hi"));
+        assert!(st.snapshot_after(None).is_none());
+    }
+
+    /// With a watermark, snapshot returns the *oldest* buffered event
+    /// strictly newer than it (FIFO catch-up across multiple unread).
+    #[test]
+    fn snapshot_returns_oldest_after_cutoff() {
+        let st = MentionState::new();
+        st.push(ev("01H0000000000000000000000A", "first"));
+        st.push(ev("01H0000000000000000000000B", "second"));
+        st.push(ev("01H0000000000000000000000C", "third"));
+        let got = st
+            .snapshot_after(Some("01H0000000000000000000000A"))
+            .expect("expected the second event");
+        assert_eq!(got.id, "01H0000000000000000000000B");
+    }
+
+    /// Watermark equal to or above the latest id → no buffered replay.
+    #[test]
+    fn snapshot_skips_when_caught_up() {
+        let st = MentionState::new();
+        st.push(ev("01H0000000000000000000000A", "first"));
+        assert!(st.snapshot_after(Some("01H0000000000000000000000A")).is_none());
+        assert!(st.snapshot_after(Some("01H0000000000000000000000Z")).is_none());
+    }
+
+    /// Push beyond capacity drops the oldest. Otherwise a noisy room would
+    /// pin stale mentions in front of fresh ones forever.
+    #[test]
+    fn buffer_evicts_oldest_at_capacity() {
+        let st = MentionState::new();
+        for i in 0..(MENTION_BUFFER_CAP + 5) {
+            st.push(ev(&format!("01H{:023}", i), "x"));
+        }
+        let buf = st.recent.lock().unwrap();
+        assert_eq!(buf.len(), MENTION_BUFFER_CAP);
+        // Oldest still present is index 5 (0..4 evicted).
+        let first = buf.front().unwrap();
+        assert_eq!(first.id, format!("01H{:023}", 5));
+    }
+
+    /// Live broadcast: a subscriber sees an event pushed AFTER it
+    /// subscribed (the canonical wait_for_mention path).
+    #[tokio::test]
+    async fn broadcast_delivers_to_live_subscriber() {
+        let st = MentionState::new();
+        let mut rx = st.tx.subscribe();
+        st.push(ev("01H0000000000000000000000A", "live"));
+        let got = rx.recv().await.expect("subscriber should receive");
+        assert_eq!(got.id, "01H0000000000000000000000A");
+    }
+
+    /// Best-effort: pushing with no subscribers MUST NOT error or panic.
+    #[test]
+    fn push_with_no_subscribers_is_noop() {
+        let st = MentionState::new();
+        st.push(ev("01H0000000000000000000000A", "x"));
+        // No assertion needed — getting here is the point.
     }
 }

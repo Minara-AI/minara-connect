@@ -175,6 +175,17 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["text"]
             }
+        },
+        {
+            "name": "cc_wait_for_mention",
+            "description": "Block until a peer @-mentions you in the bound room (or until the timeout). This is the ambient-listener entry point: after replying to the user (or after handling one mention), call this tool again immediately so a new mention wakes you the moment it arrives. Pass `since_id` from the previous response's `mention.id` to pick up any mention that landed between two calls (the server keeps a 32-entry buffer). Returns `{mention: {id, ts, nick, body}, reason: \"received\"|\"buffered\"}` on a hit, or `{mention: null, reason: \"timeout\"|\"lagged\"}` so you can re-arm. After a hit, decide whether to reply via cc_send / cc_at, then re-arm with `since_id = mention.id`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since_id": {"type": "string", "description": "ULID watermark — only mentions strictly newer than this are returned from the buffer. Omit on the very first call to wait only for new live events."},
+                    "timeout_seconds": {"type": "integer", "description": "Block at most this many seconds (default 300, max 600). On timeout the call returns `{mention: null, reason: \"timeout\"}` and you should re-arm.", "minimum": 1, "maximum": 600}
+                }
+            }
         }
     ])
 }
@@ -239,6 +250,46 @@ async fn call_tool(name: &str, args: Value) -> Result<String> {
                 .ok_or_else(|| anyhow!("missing `text`"))?;
             ipc_call(json!({"action": "save_summary", "text": text})).await?;
             Ok(format!("summary saved ({} bytes)", text.len()))
+        }
+        "cc_wait_for_mention" => {
+            let since_id = args.get("since_id").and_then(|x| x.as_str());
+            let timeout_seconds = args
+                .get("timeout_seconds")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(300);
+            let timeout_ms = timeout_seconds.saturating_mul(1000);
+            let mut payload = json!({"action": "wait_for_mention", "timeout_ms": timeout_ms});
+            if let Some(s) = since_id {
+                payload["since_id"] = json!(s);
+            }
+            let resp = ipc_call(payload).await?;
+            // Pass the structured result through verbatim — Claude reads
+            // both the human-readable summary line AND the JSON to decide
+            // what to do next (reply via cc_send / cc_at, or re-arm).
+            let pretty = serde_json::to_string_pretty(&resp).unwrap_or_default();
+            let summary = match resp.get("mention") {
+                Some(m) if !m.is_null() => {
+                    let nick = m.get("nick").and_then(|x| x.as_str()).unwrap_or("?");
+                    let body = m.get("body").and_then(|x| x.as_str()).unwrap_or("");
+                    let id = m.get("id").and_then(|x| x.as_str()).unwrap_or("?");
+                    format!(
+                        "@-mention from {nick} (id={id}): {body}\n\n\
+                         Reply via cc_send / cc_at if appropriate, then call \
+                         cc_wait_for_mention again with since_id={id} to re-arm."
+                    )
+                }
+                _ => {
+                    let reason = resp
+                        .get("reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("timeout");
+                    format!(
+                        "no mention this window (reason={reason}). \
+                         Re-arm by calling cc_wait_for_mention again."
+                    )
+                }
+            };
+            Ok(format!("{summary}\n\n---\n{pretty}"))
         }
         other => bail!("unknown tool: {other}"),
     }

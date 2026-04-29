@@ -37,6 +37,15 @@ pub struct HookInput<'a> {
     /// (only the always-on `@cc` / `@claude` / `@all` / `@here` tokens
     /// still trigger the mark).
     pub self_nick: Option<&'a str>,
+    /// Owner Pubkey (base32, the `pubkey_string()` form). Used to enforce
+    /// the owner-only @-mention rule: a `for-you` tag fires ONLY when the
+    /// message was authored by the owning human (i.e. `msg.author ==
+    /// self_pubkey` AND `msg.nick` is the human form, not `<self>-cc`).
+    /// Peer @-mentions remain visible (the chat lines render verbatim) but
+    /// don't carry the priority directive. `None` disables owner gating —
+    /// then `for-you` falls back to the legacy "anyone-can-ping" rule, so
+    /// older callers continue to work.
+    pub self_pubkey: Option<&'a str>,
     /// topic_id_hex → markdown summary text. Optional per-room rolling
     /// summary written by Claude via the MCP `cc_save_summary` tool.
     /// Injected ahead of the verbatim chat lines so Claude can pick up
@@ -77,6 +86,7 @@ pub fn render(input: &HookInput) -> String {
                 input.rooms_base,
                 multi_room,
                 input.self_nick,
+                input.self_pubkey,
             )
         })
         .collect();
@@ -189,13 +199,15 @@ fn format_line(
     rooms_base: &Path,
     multi_room: bool,
     self_nick: Option<&str>,
+    self_pubkey: Option<&str>,
 ) -> String {
     let nick = nick_for(nicknames, msg);
     let time = format_utc_hhmm(msg.ts);
-    // Detect @-mentions in the body so Claude knows to prioritise these.
-    // The body is the raw user-submitted text; the prefix tags are added
-    // by *us*, so they can't false-positive.
-    let mention = mentions_self(&msg.body, self_nick);
+    // for-you tag: under the owner-only rule, fires only when the message
+    // came from this Claude's owning human (not from peers, not from the
+    // AI's own broadcast). Without `self_pubkey` we degrade to the legacy
+    // "anyone-can-ping" rule so older callers / tests still work.
+    let mention = is_owner_directive(msg, self_pubkey, self_nick);
     let mention_tag = if mention { "for-you " } else { "" };
     let prefix = if multi_room {
         let tag = topic.chars().take(6).collect::<String>().to_ascii_lowercase();
@@ -218,6 +230,50 @@ fn format_line(
         let body = sanitize_body(&msg.body);
         format!("{prefix} {body}\n")
     }
+}
+
+/// Owner-only @-mention rule.
+///
+/// Returns `true` iff `msg` should carry the `for-you` priority tag.
+/// Conditions, all of which must hold:
+///
+///   1. `self_pubkey` is provided AND `msg.author == self_pubkey`. Peer
+///      @-mentions are deliberately NOT counted as priority directives —
+///      under cc-connect's social model only the owning human can drive
+///      their own AI. Peers can still see the line render verbatim
+///      (non-`for-you`) so the AI can decide whether to volunteer a reply.
+///   2. `msg.nick` does NOT end with the `-cc` AI-suffix. The chat session
+///      brands MCP-driven sends as `<self>-cc` so peers can tell the AI
+///      apart from the human; we use that same suffix here to keep the
+///      AI's own `@cc` broadcasts from re-triggering itself.
+///   3. The body actually mentions self (`mentions_self` matches).
+///
+/// `self_pubkey: None` falls back to the legacy "anyone can ping" rule so
+/// existing callers / tests that don't carry a pubkey still get the old
+/// behaviour. Production callers (the hook) MUST pass `self_pubkey`.
+pub fn is_owner_directive(
+    msg: &Message,
+    self_pubkey: Option<&str>,
+    self_nick: Option<&str>,
+) -> bool {
+    if !mentions_self(&msg.body, self_nick) {
+        return false;
+    }
+    let Some(pk) = self_pubkey else {
+        // Legacy mode: any mention of self counts.
+        return true;
+    };
+    if msg.author != pk {
+        return false;
+    }
+    // The AI's own MCP-driven sends carry a `<base>-cc` suffix on `nick`.
+    // Anything ending in `-cc` is the AI form — skip to break the loop.
+    if let Some(nick) = msg.nick.as_deref() {
+        if nick.ends_with("-cc") {
+            return false;
+        }
+    }
+    true
 }
 
 /// Body-content scan for @-mentions of the receiving user.
@@ -375,7 +431,7 @@ mod tests {
     fn empty_rooms_renders_empty_string() {
         let nm = nicks(&[]);
         let rooms = HashMap::new();
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         assert_eq!(out, "");
     }
 
@@ -383,7 +439,7 @@ mod tests {
     fn single_room_no_messages_renders_empty() {
         let nm = nicks(&[]);
         let rooms = one_room("a1b2c3d4e5f6", vec![]);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         assert_eq!(out, "");
     }
 
@@ -398,7 +454,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, "alice")]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "hi")];
         let rooms = one_room("a1b2c3d4e5f6", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         assert_eq!(out, "[chatroom @alice 00:00Z] hi\n");
     }
 
@@ -407,7 +463,7 @@ mod tests {
         let nm = nicks(&[]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "x")];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         assert_eq!(out, "[chatroom @hnvcppgo 00:00Z] x\n");
     }
 
@@ -417,7 +473,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, bad_nick)]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "x")];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         // \n→?, \t→?, é (2 bytes 0xc3 0xa9) → 2× '?' per byte-for-byte rule.
         assert!(out.contains("@al?ice???"), "got: {out}");
     }
@@ -428,7 +484,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, "x")]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, body_raw)];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         assert!(
             out.contains("a b c é d"),
             "tab+DEL→space, é preserved: got {out}"
@@ -461,7 +517,7 @@ mod tests {
             "bbbbbb222222".to_string(),
             vec![make(&ulid(2), B_PUBKEY, 0, "from B")],
         );
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         let expected =
             "[chatroom aaaaaa @alice 00:00Z] from A\n\
              [chatroom bbbbbb @bob 00:00Z] from B\n";
@@ -483,7 +539,7 @@ mod tests {
             "bbbbbb".to_string(),
             vec![make(&ulid(2), B_PUBKEY, 0, "B middle")],
         );
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("A first"));
@@ -503,7 +559,7 @@ mod tests {
             msgs.push(make(&id, A_PUBKEY, 0, &body));
         }
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
 
         assert!(out.len() <= HOOK_OUTPUT_BUDGET, "MUST fit within 8 KiB; got {}", out.len());
         assert!(
@@ -537,7 +593,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, "alice")]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "small")];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         assert!(!out.starts_with("[chatroom] ("));
     }
 
@@ -546,7 +602,7 @@ mod tests {
         let nm = nicks(&[(A_PUBKEY, "alice")]);
         let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "")];
         let rooms = one_room("a1b2c3", msgs);
-        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map() });
+        let out = render(&HookInput { rooms: &rooms, nicknames: &nm, rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"), self_nick: None, room_summaries: empty_map(), room_file_indexes: empty_map(), self_pubkey: None });
         assert_eq!(out, "[chatroom @alice 00:00Z] \n");
     }
 
@@ -574,6 +630,7 @@ mod tests {
             self_nick: None,
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
+            self_pubkey: None,
         });
         let expected_path = format!(
             "/var/tmp/cc-test/rooms/{topic}/files/{}-design.svg",
@@ -622,10 +679,109 @@ mod tests {
             self_nick: Some("bob"),
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
+            self_pubkey: None, // legacy: no owner gating
         });
         assert!(
             out.starts_with("[chatroom for-you @alice 00:00Z]"),
-            "expected `for-you` tag, got: {out}"
+            "expected `for-you` tag (legacy mode), got: {out}"
+        );
+    }
+
+    /// Owner-only rule: a peer @-mentioning us (`@bob`) MUST NOT carry
+    /// the `for-you` tag, because under cc-connect's social model only
+    /// the owning human can drive their own AI.
+    #[test]
+    fn owner_rule_strips_for_you_when_author_is_peer() {
+        let nm = nicks(&[(A_PUBKEY, "alice"), (B_PUBKEY, "bob")]);
+        // Owner is bob (B_PUBKEY). The mention is authored by alice (A_PUBKEY).
+        let m = make(&ulid(1), A_PUBKEY, 0, "hey @bob can you handle this?");
+        let rooms = one_room("aabb11", vec![m]);
+        let out = render(&HookInput {
+            rooms: &rooms,
+            nicknames: &nm,
+            rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"),
+            self_nick: Some("bob"),
+            room_summaries: empty_map(),
+            room_file_indexes: empty_map(),
+            self_pubkey: Some(B_PUBKEY),
+        });
+        assert!(
+            !out.contains("for-you"),
+            "peer @-mention MUST NOT be tagged for-you under owner rule, got: {out}"
+        );
+        // The line still renders verbatim — visibility is unchanged, only
+        // the priority directive is gated.
+        assert!(out.contains("@alice"), "peer line still rendered: {out}");
+    }
+
+    /// Owner's own typed @-mention DOES carry the `for-you` tag — this
+    /// is the supported wake path (the human typing into chat to direct
+    /// their own AI).
+    #[test]
+    fn owner_rule_keeps_for_you_when_author_is_owner_human() {
+        let nm = nicks(&[(B_PUBKEY, "bob")]);
+        let mut m = make(&ulid(1), B_PUBKEY, 0, "@bob-cc please summarise");
+        // Owner human form has no `-cc` suffix on `nick`.
+        m = m.with_nick(Some("bob".to_string())).unwrap();
+        let rooms = one_room("aabb11", vec![m]);
+        let out = render(&HookInput {
+            rooms: &rooms,
+            nicknames: &nm,
+            rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"),
+            self_nick: Some("bob"),
+            room_summaries: empty_map(),
+            room_file_indexes: empty_map(),
+            self_pubkey: Some(B_PUBKEY),
+        });
+        assert!(
+            out.contains("for-you"),
+            "owner-typed @-mention MUST be for-you, got: {out}"
+        );
+    }
+
+    /// Owner's own AI broadcast (`<self>-cc` nick) MUST NOT self-tag,
+    /// otherwise an `@cc` in the AI's reply re-triggers itself in a loop.
+    #[test]
+    fn owner_rule_skips_for_you_for_self_ai_broadcasts() {
+        let nm = nicks(&[(B_PUBKEY, "bob")]);
+        let mut m = make(&ulid(1), B_PUBKEY, 0, "@cc thinking out loud here");
+        // AI form carries the `-cc` suffix on `nick`.
+        m = m.with_nick(Some("bob-cc".to_string())).unwrap();
+        let rooms = one_room("aabb11", vec![m]);
+        let out = render(&HookInput {
+            rooms: &rooms,
+            nicknames: &nm,
+            rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"),
+            self_nick: Some("bob"),
+            room_summaries: empty_map(),
+            room_file_indexes: empty_map(),
+            self_pubkey: Some(B_PUBKEY),
+        });
+        assert!(
+            !out.contains("for-you"),
+            "self-AI broadcast MUST NOT for-you-tag itself, got: {out}"
+        );
+    }
+
+    /// Universal tokens (`@all`, `@cc`, etc.) from a peer also fall under
+    /// the owner rule — peers can't broadcast-command our AI.
+    #[test]
+    fn owner_rule_strips_for_you_for_peer_at_all() {
+        let nm = nicks(&[(A_PUBKEY, "alice"), (B_PUBKEY, "bob")]);
+        let m = make(&ulid(1), A_PUBKEY, 0, "@all standup in 5");
+        let rooms = one_room("aabb11", vec![m]);
+        let out = render(&HookInput {
+            rooms: &rooms,
+            nicknames: &nm,
+            rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"),
+            self_nick: Some("bob"),
+            room_summaries: empty_map(),
+            room_file_indexes: empty_map(),
+            self_pubkey: Some(B_PUBKEY),
+        });
+        assert!(
+            !out.contains("for-you"),
+            "peer-broadcast `@all` MUST NOT be tagged for-you under owner rule, got: {out}"
         );
     }
 }
