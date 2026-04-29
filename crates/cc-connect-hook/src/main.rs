@@ -81,7 +81,7 @@ fn run() -> Result<()> {
     let self_nick = read_self_nick();
     let room_summaries = read_room_summaries(&rooms_base, rooms.keys());
     let room_file_indexes = read_room_file_indexes(&rooms_base, rooms.keys());
-    let output = hook_format::render(&hook_format::HookInput {
+    let body = hook_format::render(&hook_format::HookInput {
         rooms: &rooms,
         nicknames: &nicknames,
         rooms_base: &rooms_base,
@@ -89,6 +89,18 @@ fn run() -> Result<()> {
         room_summaries: &room_summaries,
         room_file_indexes: &room_file_indexes,
     });
+    // Prepend a per-prompt orientation header. Tells Claude exactly which
+    // cc-connect room it's bound to + what MCP tools it has + what nick
+    // peers see it as. Without this Claude is blind to its own
+    // membership and asks "which room?" on every prompt.
+    // Empty body = no unread chat. Stay silent (no header either) so the
+    // hook doesn't spam Claude on every prompt when the room is quiet.
+    let output = if body.is_empty() {
+        String::new()
+    } else {
+        let header = build_orientation_header(&topic_ids, self_nick.as_deref());
+        format!("{header}{body}")
+    };
 
     // Step 7: write to stdout. Empty output = exit 0 (no marker, no boilerplate).
     if !output.is_empty() {
@@ -266,6 +278,31 @@ fn read_nicknames() -> HashMap<String, String> {
         Err(_) => return HashMap::new(),
     };
     serde_json::from_str(&raw).unwrap_or_default()
+}
+
+/// Per-prompt orientation block. Tells Claude what room it's in, what
+/// nick peers see, and which MCP tools exist. Without it Claude has to
+/// guess from the chat lines alone — and often guesses wrong.
+fn build_orientation_header(topic_ids: &[String], self_nick: Option<&str>) -> String {
+    if topic_ids.is_empty() {
+        return String::new();
+    }
+    let nick_line = match self_nick {
+        Some(n) if !n.is_empty() => format!("you (this Claude) = {n}"),
+        _ => "you (this Claude) = anonymous (no self_nick set)".to_string(),
+    };
+    let topics_line = topic_ids
+        .iter()
+        .map(|t| t.chars().take(12).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut s = String::new();
+    s.push_str("[cc-connect] active room context\n");
+    s.push_str(&format!("  topics: {topics_line}\n"));
+    s.push_str(&format!("  {nick_line}\n"));
+    s.push_str("  MCP tools you can call: cc_send(body), cc_at(nick, body), cc_drop(path), cc_recent(limit), cc_list_files(limit), cc_save_summary(text)\n");
+    s.push_str("  Lines below tagged [chatroom …] are unread chat messages from peers; mention them if relevant before answering the user.\n\n");
+    s
 }
 
 /// For each active topic, read `<rooms_base>/<topic>/summary.md` if it

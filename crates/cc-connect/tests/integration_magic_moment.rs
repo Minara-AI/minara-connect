@@ -75,15 +75,19 @@ fn magic_moment_hook_emits_canonical_chatroom_line_and_advances_cursor() {
     // PROTOCOL.md §7.3 step 5 single-Room format:
     //   `[chatroom @<nick> <hh:mm>Z] <body>\n`
     // Without nicknames.json, nick falls back to the first 8 chars of the Pubkey.
-    let expected = format!(
+    let expected_tail = format!(
         "[chatroom @{} 00:00Z] {}\n",
         &TEST_PUBKEY[..8],
         TEST_BODY
     );
     let actual = String::from_utf8(out.stdout).expect("hook stdout is UTF-8");
-    assert_eq!(
-        actual, expected,
-        "hook stdout must match the canonical single-Room format byte-exact"
+    assert!(
+        actual.ends_with(&expected_tail),
+        "hook stdout must end with the canonical single-Room chat line. got: {actual:?}"
+    );
+    assert!(
+        actual.starts_with("[cc-connect] active room context"),
+        "hook stdout must start with the orientation header. got: {actual:?}"
     );
 
     // PROTOCOL.md §9 + §7.3 step 8: cursor advanced atomically to the Message id.
@@ -221,14 +225,14 @@ fn routing_with_env_var_scopes_to_one_room() {
 
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    let expected = format!(
+    let expected_tail = format!(
         "[chatroom @{} 00:00Z] {}\n",
         &TEST_PUBKEY[..8],
         BODY_A
     );
-    assert_eq!(
-        stdout, expected,
-        "CC_CONNECT_ROOM MUST scope to exactly one room and use the single-room prefix"
+    assert!(
+        stdout.ends_with(&expected_tail),
+        "CC_CONNECT_ROOM MUST scope to exactly one room with the single-room prefix; got: {stdout:?}"
     );
     assert!(
         !stdout.contains(BODY_B),

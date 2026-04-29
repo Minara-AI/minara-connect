@@ -23,6 +23,7 @@ pub fn run() -> Result<()> {
     check_identity(&mut report);
     check_active_rooms_dir(&mut report);
     check_settings_json_hook(&mut report);
+    check_settings_json_mcp(&mut report);
 
     println!();
     println!(
@@ -186,6 +187,21 @@ fn check_settings_json_hook(report: &mut Report) {
 
     let mut found_command: Option<String> = None;
     for entry in entries {
+        // Correct nested shape: {matcher, hooks: [{type, command}, …]}.
+        if let Some(hs) = entry.get("hooks").and_then(|x| x.as_array()) {
+            for h in hs {
+                if let Some(cmd) = h.get("command").and_then(|c| c.as_str()) {
+                    if cmd.contains("cc-connect-hook") {
+                        found_command = Some(cmd.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        if found_command.is_some() {
+            break;
+        }
+        // Legacy flat shape that earlier install.sh runs wrote by mistake.
         if let Some(cmd) = entry.get("command").and_then(|c| c.as_str()) {
             if cmd.contains("cc-connect-hook") {
                 found_command = Some(cmd.to_string());
@@ -236,6 +252,77 @@ fn check_settings_json_hook(report: &mut Report) {
             ));
         }
     }
+}
+
+/// Check `~/.claude/settings.json::mcpServers` for a cc-connect entry
+/// pointing at the cc-connect-mcp binary, and that the binary exists +
+/// is executable. Without this, the embedded Claude can't call back
+/// into chat (no cc_send / cc_at / cc_drop / etc.).
+fn check_settings_json_mcp(report: &mut Report) {
+    let path = home_dir().join(".claude").join("settings.json");
+    let raw = match fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(_) => {
+            report.warn("settings.json missing — MCP server not registered");
+            return;
+        }
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            // Already failed above for the hook check; don't double-flag.
+            return;
+        }
+    };
+    let servers = match parsed.get("mcpServers").and_then(|x| x.as_object()) {
+        Some(s) => s,
+        None => {
+            report.warn(
+                "settings.json has no mcpServers — Claude can't reply to chat. \
+                 Run `./install.sh` (or `cc-connect-tui` once and accept the wizard).",
+            );
+            return;
+        }
+    };
+    let mut found_cmd: Option<String> = None;
+    for (_name, entry) in servers {
+        if let Some(cmd) = entry.get("command").and_then(|c| c.as_str()) {
+            if cmd.contains("cc-connect-mcp") {
+                found_cmd = Some(cmd.to_string());
+                break;
+            }
+        }
+    }
+    let cmd = match found_cmd {
+        Some(c) => c,
+        None => {
+            report.warn(
+                "no mcpServers entry mentions cc-connect-mcp — Claude can't call cc_send/cc_at/cc_drop. \
+                 Run `./install.sh` to add it.",
+            );
+            return;
+        }
+    };
+    let p = Path::new(&cmd);
+    match fs::metadata(p) {
+        Ok(meta) => {
+            let mode = meta.permissions().mode();
+            if mode & 0o111 != 0 {
+                report.ok(&format!("mcp server {} exists and is executable", p.display()));
+            } else {
+                report.fail(&format!("{} exists but is not executable", p.display()));
+            }
+        }
+        Err(_) => {
+            report.fail(&format!(
+                "settings.json points at MCP {} but it does not exist",
+                p.display()
+            ));
+        }
+    }
+    report.info(
+        "if Claude Code says 'cc-connect MCP not found' even though this check passed, restart Claude Code so it re-reads settings.json on launch.",
+    );
 }
 
 #[cfg(test)]
