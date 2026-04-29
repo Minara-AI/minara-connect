@@ -50,6 +50,15 @@ pub struct RoomTab {
 
     /// Per-tab chat scrollback (rendered in left pane when this tab is active).
     pub chat_lines: VecDeque<ChatLine>,
+    /// Chat scrollback offset, in lines back from the live bottom.
+    /// 0 = follow bottom; new messages auto-pin to the latest. >0 holds
+    /// the user N lines back so peer chat doesn't push their reading
+    /// position out from under them.
+    pub chat_scroll: u16,
+    /// User-controlled claude pane scrollback offset (rows up from live).
+    /// 0 = follow live output. Applied via `vt100::Screen::set_scrollback`
+    /// just before each draw of the active tab.
+    pub claude_scroll: u16,
     /// Per-tab textbox.
     pub input_buf: String,
 
@@ -222,8 +231,18 @@ pub async fn spawn_tab(id: TabId, args: SpawnTabArgs, io: &TabIo) -> Result<Room
         pty_master,
         pty_writer,
         pty_child,
-        vt_parser: vt100::Parser::new(args.initial_pty_size.rows, args.initial_pty_size.cols, 0),
+        // Scrollback capacity 5000 rows: enough to look back through a
+        // long claude session, small enough to not balloon memory across
+        // many tabs. Without this (the previous `0`) `set_scrollback`
+        // had nothing to show, which is why the pane refused to scroll.
+        vt_parser: vt100::Parser::new(
+            args.initial_pty_size.rows,
+            args.initial_pty_size.cols,
+            5000,
+        ),
         chat_lines: VecDeque::new(),
+        chat_scroll: 0,
+        claude_scroll: 0,
         input_buf: String::new(),
         recent_nicks: VecDeque::new(),
         mention_idx: 0,

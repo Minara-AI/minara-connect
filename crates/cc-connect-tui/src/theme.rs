@@ -80,6 +80,10 @@ pub fn chat_warn() -> Style {
     Style::default().fg(YELLOW)
 }
 
+pub fn chat_timestamp() -> Style {
+    Style::default().fg(OVERLAY1).add_modifier(Modifier::DIM)
+}
+
 // Mention-of-me styling: louder than regular incoming, with a bright pink
 // (@me) marker on the left margin.
 pub fn chat_mention_marker() -> Style {

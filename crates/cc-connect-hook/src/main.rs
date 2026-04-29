@@ -30,19 +30,23 @@ fn run() -> Result<()> {
         }
     };
 
-    // Step 2-3: enumerate active rooms (live PIDs only). If
-    // `CC_CONNECT_ROOM` is set in the hook's environment, scope to that one
-    // topic — used by the TUI/room orchestrator to bind a specific Claude
-    // Code session to a specific room. Standalone Claude Code (no env var)
-    // keeps the legacy "inject every active room" behaviour.
+    // Step 2-3: only inject when this Claude Code session was explicitly
+    // bound to a room via the `CC_CONNECT_ROOM` env var (set by the
+    // cc-connect TUI when it spawns a child claude). Any other Claude
+    // Code — a fresh terminal, a different project, an unrelated tool —
+    // gets a no-op. Without this gate the hook bleeds chat context into
+    // every Claude Code session on the box, which the user rightly
+    // called pollution.
+    let forced = match std::env::var("CC_CONNECT_ROOM") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(()),
+    };
     let active_rooms_dir = active_rooms_dir()?;
     let mut topic_ids = enumerate_active_rooms(&active_rooms_dir)?;
-    if let Ok(forced) = std::env::var("CC_CONNECT_ROOM") {
-        topic_ids.retain(|t| t == &forced);
-    }
+    topic_ids.retain(|t| t == &forced);
     if topic_ids.is_empty() {
-        // No (matching) active rooms → empty stdout, exit 0. Canonical
-        // "no new Messages".
+        // Bound topic exists in env but has no live `*.active` PID file —
+        // the chat session crashed or the room was closed. Stay silent.
         return Ok(());
     }
 

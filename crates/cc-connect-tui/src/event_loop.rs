@@ -103,27 +103,24 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     app.tabs.add(initial_tab);
     push_chat_to_active(
         &mut app,
-        ChatLine {
-            kind: ChatLineKind::System,
-            text: format!(
+        ChatLine::new(
+            ChatLineKind::System,
+            format!(
                 "Room {} — Ctrl-N new tab, Ctrl-W close tab, F2 switch pane, Ctrl-Q quit",
                 banner_topic
             ),
-        },
+        ),
     );
     push_chat_to_active(
         &mut app,
-        ChatLine {
-            kind: ChatLineKind::System,
-            text: "Share this ticket to invite peers:".to_string(),
-        },
+        ChatLine::new(
+            ChatLineKind::System,
+            "Share this ticket to invite peers:".to_string(),
+        ),
     );
     push_chat_to_active(
         &mut app,
-        ChatLine {
-            kind: ChatLineKind::Marker,
-            text: banner_ticket,
-        },
+        ChatLine::new(ChatLineKind::Marker, banner_ticket),
     );
 
     // ---- Terminal init ----------------------------------------------------
@@ -137,6 +134,13 @@ pub async fn run(opts: RunOpts) -> Result<()> {
     let claude_cwd = opts.claude_cwd.clone();
 
     loop {
+        // Apply the active tab's claude-pane scrollback offset to vt100
+        // before drawing. set_scrollback is cheap (just a Screen field
+        // mutation) — re-applying every frame keeps the rendered view in
+        // sync with `claude_scroll` without any other plumbing.
+        if let Some(t) = app.tabs.active_tab_mut() {
+            t.vt_parser.screen_mut().set_scrollback(t.claude_scroll as usize);
+        }
         terminal.draw(|f| draw(f, &app)).context("draw")?;
         if app.should_exit || app.tabs.is_empty() {
             break;
@@ -193,14 +197,8 @@ fn push_chat_to_active(app: &mut App, line: ChatLine) {
 
 fn apply_display_line(app: &mut App, tid: TabId, line: DisplayLine) {
     let line = match line {
-        DisplayLine::System(s) => ChatLine {
-            kind: ChatLineKind::System,
-            text: s,
-        },
-        DisplayLine::Marker(s) => ChatLine {
-            kind: ChatLineKind::Marker,
-            text: s,
-        },
+        DisplayLine::System(s) => ChatLine::new(ChatLineKind::System, s),
+        DisplayLine::Marker(s) => ChatLine::new(ChatLineKind::Marker, s),
         DisplayLine::Incoming { nick_short, body, mentions_me } => {
             let kind = if mentions_me {
                 ChatLineKind::IncomingMention
@@ -212,19 +210,10 @@ fn apply_display_line(app: &mut App, tid: TabId, line: DisplayLine) {
             if let Some(t) = app.tabs.get_mut(tid) {
                 t.record_nick(&nick_short);
             }
-            ChatLine {
-                kind,
-                text: format!("{prefix}[{nick_short}] {body}"),
-            }
+            ChatLine::new(kind, format!("{prefix}[{nick_short}] {body}"))
         }
-        DisplayLine::Echo(s) => ChatLine {
-            kind: ChatLineKind::Echo,
-            text: s,
-        },
-        DisplayLine::Warn(s) => ChatLine {
-            kind: ChatLineKind::Warn,
-            text: s,
-        },
+        DisplayLine::Echo(s) => ChatLine::new(ChatLineKind::Echo, s),
+        DisplayLine::Warn(s) => ChatLine::new(ChatLineKind::Warn, s),
     };
     if let Some(t) = app.tabs.get_mut(tid) {
         t.push_chat(line);
@@ -272,25 +261,22 @@ async fn handle_key(
                     match arboard::Clipboard::new().and_then(|mut c| c.set_text(ticket.clone())) {
                         Ok(()) => push_chat_to_active(
                             app,
-                            ChatLine {
-                                kind: ChatLineKind::System,
-                                text: "✓ ticket copied to clipboard".to_string(),
-                            },
+                            ChatLine::new(
+                                ChatLineKind::System,
+                                "✓ ticket copied to clipboard".to_string(),
+                            ),
                         ),
                         Err(e) => {
                             push_chat_to_active(
                                 app,
-                                ChatLine {
-                                    kind: ChatLineKind::Warn,
-                                    text: format!("clipboard unreachable ({e}); reprinting below"),
-                                },
+                                ChatLine::new(
+                                    ChatLineKind::Warn,
+                                    format!("clipboard unreachable ({e}); reprinting below"),
+                                ),
                             );
                             push_chat_to_active(
                                 app,
-                                ChatLine {
-                                    kind: ChatLineKind::Marker,
-                                    text: ticket,
-                                },
+                                ChatLine::new(ChatLineKind::Marker, ticket),
                             );
                         }
                     }
@@ -325,10 +311,46 @@ async fn handle_key(
         return;
     }
 
+    // PageUp/PageDown scroll the focused pane regardless of focus.
+    // Claude rarely needs PgUp/PgDn for its own UI, so it's safe to
+    // intercept globally — the user gets a single, predictable scroll
+    // gesture in either pane.
+    match key.code {
+        KeyCode::PageUp => {
+            scroll_active_pane(app, -SCROLL_STEP);
+            return;
+        }
+        KeyCode::PageDown => {
+            scroll_active_pane(app, SCROLL_STEP);
+            return;
+        }
+        _ => {}
+    }
+
     match app.focus {
         Focus::Chat => handle_chat_key(app, key).await,
         Focus::Claude => handle_claude_key(app, key).await,
     }
+}
+
+/// One PgUp / PgDn nudges the active pane by this many lines (chat) or
+/// rows (claude). Approximately a half-screen at typical terminal sizes.
+const SCROLL_STEP: i32 = 10;
+
+fn scroll_active_pane(app: &mut App, delta: i32) {
+    let focus = app.focus;
+    let Some(t) = app.tabs.active_tab_mut() else {
+        return;
+    };
+    let target = match focus {
+        Focus::Chat => &mut t.chat_scroll,
+        Focus::Claude => &mut t.claude_scroll,
+    };
+    *target = if delta < 0 {
+        target.saturating_add((-delta) as u16)
+    } else {
+        target.saturating_sub(delta as u16)
+    };
 }
 
 async fn handle_chat_key(app: &mut App, key: KeyEvent) {
@@ -478,14 +500,17 @@ async fn handle_overlay_key(
                             let topic = tab.topic_short();
                             let ticket = tab.ticket.clone();
                             app.tabs.add(tab);
-                            push_chat_to_active(app, ChatLine {
-                                kind: ChatLineKind::System,
-                                text: format!("Joined room {topic}"),
-                            });
-                            push_chat_to_active(app, ChatLine {
-                                kind: ChatLineKind::Marker,
-                                text: ticket,
-                            });
+                            push_chat_to_active(
+                                app,
+                                ChatLine::new(
+                                    ChatLineKind::System,
+                                    format!("Joined room {topic}"),
+                                ),
+                            );
+                            push_chat_to_active(
+                                app,
+                                ChatLine::new(ChatLineKind::Marker, ticket),
+                            );
                         }
                         Err(e) => {
                             next = Some(Overlay::Notice(format!("join failed: {e:#}")));

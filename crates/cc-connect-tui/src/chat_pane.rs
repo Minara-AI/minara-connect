@@ -2,7 +2,7 @@
 //! input box at the bottom. Operates on the currently-active [`RoomTab`].
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -43,20 +43,48 @@ pub fn render(
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    let lines: Vec<Line> = tab
-        .chat_lines
-        .iter()
-        .map(|cl| match cl.kind {
+    let mut lines: Vec<Line> = Vec::with_capacity(tab.chat_lines.len() * 2);
+    for cl in tab.chat_lines.iter() {
+        // Echo = our own send (local user OR our `<self>-cc` AI peer via
+        // MCP). Anything Incoming = remote peer (their human or their AI).
+        // Aligning self-left and peer-right gives the iMessage-style "my
+        // bubble vs theirs" reading the user asked for.
+        let is_peer = matches!(
+            cl.kind,
+            ChatLineKind::Incoming | ChatLineKind::IncomingMention
+        );
+        let is_self_msg = matches!(cl.kind, ChatLineKind::Echo);
+        let align = if is_peer { Alignment::Right } else { Alignment::Left };
+
+        let main = match cl.kind {
             ChatLineKind::System => Line::from(Span::styled(cl.text.clone(), theme::chat_system())),
             ChatLineKind::Marker => Line::from(Span::styled(cl.text.clone(), theme::chat_marker())),
             ChatLineKind::Incoming => render_incoming(&cl.text, false),
             ChatLineKind::IncomingMention => render_incoming(&cl.text, true),
             ChatLineKind::Echo => Line::from(Span::styled(cl.text.clone(), theme::chat_echo())),
             ChatLineKind::Warn => Line::from(Span::styled(cl.text.clone(), theme::chat_warn())),
-        })
-        .collect();
+        };
+        lines.push(main.alignment(align));
 
-    let scrollback = Paragraph::new(lines).wrap(Wrap { trim: false });
+        // Per-message timestamp on the same side as its message body.
+        if (is_peer || is_self_msg) && cl.ts > 0 {
+            let stamp = format!("{} Z", format_utc_hhmm(cl.ts));
+            lines.push(
+                Line::from(Span::styled(stamp, theme::chat_timestamp())).alignment(align),
+            );
+        }
+    }
+
+    // Scroll position. `chat_scroll` is "lines back from bottom" so 0
+    // tails the live feed (default) and PgUp grows it. We clamp into
+    // [0, max_offset] so we can never page off the top.
+    let total = lines.len() as u16;
+    let visible = chunks[0].height;
+    let max_offset = total.saturating_sub(visible);
+    let scroll_y = max_offset.saturating_sub(tab.chat_scroll);
+    let scrollback = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_y, 0));
     frame.render_widget(scrollback, chunks[0]);
 
     let prompt = if focused { "› " } else { "  " };
@@ -126,6 +154,17 @@ fn render_mention_popup(frame: &mut Frame, input_area: Rect, candidates: &[Strin
     let list = List::new(items).block(block);
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
+}
+
+/// Epoch ms → `HH:MM` UTC. Same arithmetic as cc-connect-core's
+/// `hook_format::format_utc_hhmm`, duplicated here to avoid making it
+/// pub for one caller.
+fn format_utc_hhmm(ts: i64) -> String {
+    let total_minutes = ts.div_euclid(60_000);
+    let day_minute = total_minutes.rem_euclid(1440);
+    let hh = day_minute / 60;
+    let mm = day_minute % 60;
+    format!("{hh:02}:{mm:02}")
 }
 
 /// "[<nick>] <body>" → distinct nick / body styles. When `mention` is true,

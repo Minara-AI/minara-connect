@@ -18,6 +18,20 @@ pub enum Focus {
 pub struct ChatLine {
     pub kind: ChatLineKind,
     pub text: String,
+    /// Epoch millis when this line was pushed. Drives the per-message
+    /// `HH:MM` separator the chat pane renders below content lines so
+    /// neighbouring messages stop visually fusing.
+    pub ts: i64,
+}
+
+impl ChatLine {
+    pub fn new(kind: ChatLineKind, text: String) -> Self {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        Self { kind, text, ts }
+    }
 }
 
 /// Visual style hint for a chat line.
