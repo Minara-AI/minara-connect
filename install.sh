@@ -230,6 +230,32 @@ else
   warn "skipped MCP install. Claude in your room won't be able to call cc_send / cc_at / cc_drop / cc_save_summary etc."
 fi
 
+# ---------- 3.5. PATH symlinks (~/.local/bin) -------------------------------
+# Without this, the user has to either type the absolute path or
+# `export PATH=…` themselves. ~/.local/bin is on PATH by default on most
+# distros + recent macOS; we print a tip if it isn't.
+BIN_DIR="$HOME/.local/bin"
+if confirm "Symlink binaries to $BIN_DIR so you can run them from any directory?" Y; then
+  mkdir -p "$BIN_DIR"
+  for bin in cc-connect cc-connect-tui cc-connect-hook cc-connect-mcp; do
+    src="$REPO_ROOT/target/release/$bin"
+    dest="$BIN_DIR/$bin"
+    if [[ ! -x "$src" ]]; then
+      warn "missing $src — skipping"
+      continue
+    fi
+    ln -sf "$src" "$dest"
+  done
+  ok "binaries symlinked into $BIN_DIR"
+  if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
+    warn "$BIN_DIR is not on your PATH. Add to your shell rc (~/.zshrc / ~/.bashrc):"
+    warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    warn "Then open a new shell, or:  hash -r"
+  fi
+else
+  warn "skipped PATH symlinks. Use the absolute path: $REPO_ROOT/target/release/cc-connect …"
+fi
+
 # ---------- 4. doctor smoke check --------------------------------------------
 say "running cc-connect doctor"
 "$CONNECT_BIN" doctor || warn "doctor reported issues — review the output above."
@@ -240,20 +266,15 @@ cat <<NEXT
 $(printf "\033[1;32m✓ install complete\033[0m")
 
 Next steps:
-  - Restart Claude Code so it picks up the new hook.
-  - Recommended start:  $REPO_ROOT/target/release/cc-connect room start
-      (vertical TUI, one-shot wizard for nick + MCP server install)
-  - Or host/join the old way:
-      $CONNECT_BIN host
-      $CONNECT_BIN chat <ticket>
-  - LAN-only:           pass --no-relay
-  - Self-hosted relay:  see README.md "Self-hosted relay (optional)"
-
-The TUI registers an MCP server on first run that lets the embedded
-Claude reply into chat (cc_send / cc_at / cc_drop / cc_recent /
-cc_list_files / cc_save_summary). Run \`cc-connect room start\` once
-to wire that up.
+  - Restart Claude Code so it picks up the new hook + MCP tools.
+  - Recommended start:
+        cc-connect room start          (if $BIN_DIR is on PATH)
+        $REPO_ROOT/target/release/cc-connect room start    (otherwise)
+  - Tab keys inside the TUI: 1-9 switch, Ctrl-N new, Ctrl-W close,
+    F2 / Tab switch pane, Ctrl-Y copy ticket, Ctrl-Q quit.
+  - Self-hosted relay: see README.md "Self-hosted relay (optional)".
 
 Settings live at: $SETTINGS
 Hook binary:      $HOOK_BIN
+MCP binary:       $MCP_BIN
 NEXT
