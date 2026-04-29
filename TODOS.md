@@ -74,3 +74,32 @@
 **Context:** Performance review Section 4. Explicitly deferred from v0.1 to keep scope tight; flag for inclusion in v0.2 (or v0.1 if scope room appears).
 
 **Depends on:** PROTOCOL.md cursor section.
+
+---
+
+## v0.3+
+
+### Cross-AI adapter framework (codex / gemini-cli / aider / cursor-cli)
+
+**What:** Generalise the `cc-connect-tui` PTY embedding so the right pane can run any interactive AI CLI, not just Claude Code. Inject `cc-connect-hook` (or equivalent) output as pre-prompt context for AIs that lack a native pre-prompt hook.
+
+**Why:** Mixed-AI rooms — one peer's Claude, another peer's Codex, a third peer's aider — should be able to share the same chat substrate. The chat protocol itself is AI-agnostic; only the context-injection mechanism is Claude-specific.
+
+**Design sketch:**
+- Add `--ai <bin>` to `cc-connect-tui start|join` (default `claude`).
+- Add `--prompt-decorator <cmd>` for AIs without native pre-prompt hooks. The TUI runs `<cmd>` (e.g. `cc-connect-hook`) right before forwarding each user prompt to the PTY child, prepending its stdout to the user's input bytes.
+- Per-AI: detect "user has hit Enter to submit a prompt". For TUI-style AIs (claude, codex), this is the Enter key when the input box is non-empty. For REPL-style (aider), it's the line being submitted.
+- Compatibility table: keep this matrix in README:
+    - `claude` — uses native UserPromptSubmit hook, `--prompt-decorator` ignored
+    - `aider` — `--prompt-decorator cc-connect-hook` works (REPL prompt detection trivial)
+    - `codex` — needs PTY-level prompt detection; ~1-2h tuning
+    - `gemini-cli` — same as codex
+    - `cursor-cli` — low priority (CLI is a wrapper around the GUI)
+
+**Pros:** Multi-AI parity. Existing infra (chat substrate, PTY embedding) does most of the heavy lifting.
+
+**Cons:** Per-AI prompt-detection is fragile — every AI release might shift it. Probably need `--prompt-detector <regex>` escape hatch.
+
+**Context:** User asked during v0.2 review (2026-04-29). Explicitly deferred from v0.2 to keep the @ + nick + Ctrl-C work focused; v0.3 candidate.
+
+**Depends on:** v0.2 stabilises.

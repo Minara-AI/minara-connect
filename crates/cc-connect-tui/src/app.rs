@@ -27,6 +27,9 @@ pub enum ChatLineKind {
     System,
     Marker,
     Incoming,
+    /// Incoming line that mentions me (`@<self_nick>`, `@cc`, `@claude`,
+    /// `@all`, `@here`). Renders with a louder colour + a leading marker.
+    IncomingMention,
     Echo,
     Warn,
 }

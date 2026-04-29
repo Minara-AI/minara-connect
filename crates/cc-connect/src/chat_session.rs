@@ -52,12 +52,42 @@ pub enum DisplayLine {
     /// Backfill marker, e.g. "[chatroom] (backfilled 7 messages from peer)"
     /// or "[chatroom] (joined late, no history available)".
     Marker(String),
-    /// A chat or file_drop Message we received from a remote peer.
-    Incoming { nick_short: String, body: String },
+    /// A chat or file_drop Message we received from a remote peer. The
+    /// `mentions_me` flag is true when the body contains `@<self_nick>`,
+    /// `@cc`, `@claude`, `@all`, or `@here` (case-insensitive).
+    Incoming {
+        nick_short: String,
+        body: String,
+        mentions_me: bool,
+    },
     /// Our own /drop confirmation echo (e.g. "[chat] dropped foo.svg (4096 bytes)").
     Echo(String),
     /// Soft, non-fatal error visible to the user (replaces eprintln!).
     Warn(String),
+}
+
+/// Pure function: does `body` mention "me"?
+///
+/// Recognised tokens (case-insensitive substring match):
+///   - `@<self_nick>` — only checked if `self_nick` is `Some` and non-empty.
+///   - `@cc`, `@claude` — addresses any/all Claude Code instances.
+///   - `@all`, `@here` — broadcast attention.
+pub fn line_mentions_me(body: &str, self_nick: Option<&str>) -> bool {
+    let lower = body.to_ascii_lowercase();
+    if lower.contains("@cc")
+        || lower.contains("@claude")
+        || lower.contains("@all")
+        || lower.contains("@here")
+    {
+        return true;
+    }
+    if let Some(nick) = self_nick.filter(|s| !s.is_empty()) {
+        let token = format!("@{}", nick.to_ascii_lowercase());
+        if lower.contains(&token) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Handle returned from [`spawn`].
@@ -215,6 +245,7 @@ async fn run_session(
     let listener_endpoint = endpoint.clone();
     let our_pubkey = pubkey_string.clone();
     let listener_display = display_tx.clone();
+    let listener_self_nick = self_nick.clone();
     let listener_handle = tokio::task::spawn(async move {
         let mut listener_log = match log_io::open_or_create_log(&listener_log_path) {
             Ok(f) => f,
@@ -295,8 +326,13 @@ async fn run_session(
             } else {
                 msg.body.replace(['\n', '\r', '\t'], " ")
             };
+            let mentions_me = line_mentions_me(&body, listener_self_nick.as_deref());
             let _ = listener_display
-                .send(DisplayLine::Incoming { nick_short, body })
+                .send(DisplayLine::Incoming {
+                    nick_short,
+                    body,
+                    mentions_me,
+                })
                 .await;
         }
     });

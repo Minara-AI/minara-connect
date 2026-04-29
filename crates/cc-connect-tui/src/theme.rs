@@ -80,6 +80,18 @@ pub fn chat_warn() -> Style {
     Style::default().fg(YELLOW)
 }
 
+// Mention-of-me styling: louder than regular incoming, with a bright pink
+// (@me) marker on the left margin.
+pub fn chat_mention_marker() -> Style {
+    Style::default().fg(PINK).add_modifier(Modifier::BOLD)
+}
+pub fn chat_mention_nick() -> Style {
+    Style::default().fg(PEACH).add_modifier(Modifier::BOLD)
+}
+pub fn chat_mention_body() -> Style {
+    Style::default().fg(ROSEWATER).add_modifier(Modifier::BOLD)
+}
+
 pub fn input_prompt(focused: bool) -> Style {
     if focused {
         Style::default().fg(PEACH).add_modifier(Modifier::BOLD)

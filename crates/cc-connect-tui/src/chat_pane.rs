@@ -41,7 +41,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .map(|cl| match cl.kind {
             ChatLineKind::System => Line::from(Span::styled(cl.text.clone(), theme::chat_system())),
             ChatLineKind::Marker => Line::from(Span::styled(cl.text.clone(), theme::chat_marker())),
-            ChatLineKind::Incoming => render_incoming(&cl.text),
+            ChatLineKind::Incoming => render_incoming(&cl.text, false),
+            ChatLineKind::IncomingMention => render_incoming(&cl.text, true),
             ChatLineKind::Echo => Line::from(Span::styled(cl.text.clone(), theme::chat_echo())),
             ChatLineKind::Warn => Line::from(Span::styled(cl.text.clone(), theme::chat_warn())),
         })
@@ -59,19 +60,36 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(input, chunks[1]);
 }
 
-/// "[<nick>] <body>" → distinct nick / body styles.
-fn render_incoming(text: &str) -> Line<'static> {
-    if let Some(rest) = text.strip_prefix('[') {
+/// "[<nick>] <body>" → distinct nick / body styles. When `mention` is true,
+/// the body is rendered in a brighter mention colour and the leading "(@me)"
+/// (already in the text from event_loop) keeps its bold mention style.
+fn render_incoming(text: &str, mention: bool) -> Line<'static> {
+    let (nick_style, body_style) = if mention {
+        (theme::chat_mention_nick(), theme::chat_mention_body())
+    } else {
+        (theme::chat_incoming_nick(), theme::chat_incoming_body())
+    };
+    // Strip the `(@me) ` prefix added in event_loop, render it as its own
+    // bright span so it pops on the left margin.
+    let (mention_marker, rest_text) = if let Some(rest) = text.strip_prefix("(@me) ") {
+        ("(@me) ", rest)
+    } else {
+        ("", text)
+    };
+    if let Some(rest) = rest_text.strip_prefix('[') {
         if let Some(close) = rest.find("] ") {
             let nick = &rest[..close];
             let body = &rest[close + 2..];
-            return Line::from(vec![
-                Span::styled("[".to_string(), theme::chat_incoming_nick()),
-                Span::styled(nick.to_string(), theme::chat_incoming_nick()),
-                Span::styled("] ".to_string(), theme::chat_incoming_nick()),
-                Span::styled(body.to_string(), theme::chat_incoming_body()),
-            ]);
+            let mut spans = Vec::with_capacity(5);
+            if !mention_marker.is_empty() {
+                spans.push(Span::styled(mention_marker.to_string(), theme::chat_mention_marker()));
+            }
+            spans.push(Span::styled("[".to_string(), nick_style));
+            spans.push(Span::styled(nick.to_string(), nick_style));
+            spans.push(Span::styled("] ".to_string(), nick_style));
+            spans.push(Span::styled(body.to_string(), body_style));
+            return Line::from(spans);
         }
     }
-    Line::from(Span::styled(text.to_string(), theme::chat_incoming_body()))
+    Line::from(Span::styled(rest_text.to_string(), body_style))
 }

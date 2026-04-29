@@ -156,8 +156,14 @@ pub async fn run(opts: RunOpts) -> Result<()> {
                 match line {
                     Some(DisplayLine::System(s)) => app.push_chat(ChatLineKind::System, s),
                     Some(DisplayLine::Marker(s)) => app.push_chat(ChatLineKind::Marker, s),
-                    Some(DisplayLine::Incoming { nick_short, body }) => {
-                        app.push_chat(ChatLineKind::Incoming, format!("[{nick_short}] {body}"));
+                    Some(DisplayLine::Incoming { nick_short, body, mentions_me }) => {
+                        let kind = if mentions_me {
+                            ChatLineKind::IncomingMention
+                        } else {
+                            ChatLineKind::Incoming
+                        };
+                        let prefix = if mentions_me { "(@me) " } else { "" };
+                        app.push_chat(kind, format!("{prefix}[{nick_short}] {body}"));
                     }
                     Some(DisplayLine::Echo(s)) => app.push_chat(ChatLineKind::Echo, s),
                     Some(DisplayLine::Warn(s)) => app.push_chat(ChatLineKind::Warn, s),
