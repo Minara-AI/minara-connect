@@ -1,22 +1,41 @@
-// cc-connect zellij layout — claude on the left (60%), chat-ui on the
-// right (40%). Both panes inherit `CC_CONNECT_ROOM` from the parent
-// shell (the cc-connect launcher exports it before exec'ing zellij), so
-// claude's hook fires correctly and chat-ui finds the right chat.sock.
+// cc-connect zellij layout.
 //
-// `__CLAUDE_WRAPPER__` is substituted at launch by room.rs to the path
-// of `claude-wrap.sh` (a thin shim that prepends `--append-system-prompt
-// "$(cat $CC_CONNECT_AUTO_REPLY_FILE)"` if the room launcher wrote that
-// file). This is what arms the cc_wait_for_mention auto-reply loop.
+// One zellij session named `cc-connect` hosts every active room as a tab
+// — `room start/join` either creates the session (first room) or adds a
+// new tab via `zellij action new-tab` (subsequent rooms). The tab strip
+// at the top + the status bar at the bottom make the room set visible
+// at a glance and surface the quit / new-pane / mode hotkeys.
 //
-// Embedded into the cc-connect binary via include_str! so the launcher
-// doesn't depend on a layouts/ install path.
+// Substitutions performed by room.rs at launch time:
+//   __CC_CHAT_UI_BIN__   → absolute path to cc-chat-ui
+//   __CLAUDE_WRAPPER__   → absolute path to claude-wrap.sh
+//   __CC_CONNECT_ROOM__  → topic hex (64 chars, lowercase)
+//   __TAB_NAME__         → first 12 chars of the topic, displayed in the tab bar
+//
+// The wrapper consumes its first argv as a topic hex and exports
+// CC_CONNECT_ROOM (env vars don't propagate through zellij's daemon
+// when adding a tab to an existing session). chat-ui takes `--topic`
+// directly as a CLI arg.
 layout {
-    pane split_direction="vertical" {
-        pane size="60%" {
-            command "__CLAUDE_WRAPPER__"
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
         }
-        pane size="40%" {
-            command "__CC_CHAT_UI_BIN__"
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+    tab name="__TAB_NAME__" focus=true {
+        pane split_direction="vertical" {
+            pane size="60%" {
+                command "__CLAUDE_WRAPPER__"
+                args "__CC_CONNECT_ROOM__"
+            }
+            pane size="40%" {
+                command "__CC_CHAT_UI_BIN__"
+                args "--topic" "__CC_CONNECT_ROOM__"
+            }
         }
     }
 }

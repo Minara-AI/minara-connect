@@ -201,71 +201,119 @@ fn detect_multiplexer() -> Multiplexer {
     Multiplexer::None
 }
 
+/// Single zellij session shared across every cc-connect room. First
+/// room creates the session; subsequent rooms add a new tab via
+/// `zellij action new-tab`.
+const ZELLIJ_SESSION: &str = "cc-connect";
+
 fn exec_zellij(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
-    // Materialise the layout to a tmpfile so zellij --layout can pick it
-    // up. Two substitutions:
-    //   __CC_CHAT_UI_BIN__   → absolute path to cc-chat-ui next to our own
-    //                          binary (without this zellij does a bare PATH
-    //                          lookup and panics if the binary isn't there).
-    //   __CLAUDE_WRAPPER__   → absolute path to the claude-wrap.sh shim
-    //                          (which prepends --append-system-prompt with
-    //                          the auto-reply directive when present).
+    // Resolve the four substitutions baked into the layout per launch:
+    //   __CC_CHAT_UI_BIN__   chat-ui binary next to our own
+    //   __CLAUDE_WRAPPER__   claude-wrap.sh shim (sets CC_CONNECT_ROOM
+    //                        + prepends --append-system-prompt)
+    //   __CC_CONNECT_ROOM__  topic hex (passed to wrapper as argv and
+    //                        to chat-ui via --topic)
+    //   __TAB_NAME__         12-char topic prefix shown in the tab bar
     let chat_ui_bin = locate_chat_ui_bin()?;
     let claude_wrapper = prepare_claude_wrapper()?;
-    let auto_reply = prepare_auto_reply_prompt()?;
+    let _ = prepare_auto_reply_prompt()?; // wrapper reads it from /tmp default path
+    let tab_name: String = topic_hex.chars().take(12.min(topic_hex.len())).collect();
 
     let layout_kdl = ZELLIJ_LAYOUT
         .replace("__CC_CHAT_UI_BIN__", &chat_ui_bin.to_string_lossy())
-        .replace("__CLAUDE_WRAPPER__", &claude_wrapper.to_string_lossy());
-    let layout_path = write_tmp_layout("cc-connect", "kdl", &layout_kdl)?;
-    let session_short = topic_hex
-        .chars()
-        .take(12.min(topic_hex.len()))
-        .collect::<String>();
+        .replace("__CLAUDE_WRAPPER__", &claude_wrapper.to_string_lossy())
+        .replace("__CC_CONNECT_ROOM__", topic_hex)
+        .replace("__TAB_NAME__", &tab_name);
+    let layout_path = write_tmp_layout(&format!("cc-connect-{tab_name}"), "kdl", &layout_kdl)?;
 
-    // Use -n / --new-session-with-layout (NOT --layout + --session): with
-    // --session set, plain --layout treats the layout as "add tabs to that
-    // session" and errors with "There is no active session!" when the session
-    // doesn't exist yet. -n forces "create new session with this layout"
-    // unconditionally.
-    let mut cmd = Command::new("zellij");
-    cmd.arg("--session")
-        .arg(format!("cc-connect-{session_short}"));
-    cmd.arg("-n").arg(&layout_path);
-    cmd.env("CC_CONNECT_ROOM", topic_hex);
-    if let Some(p) = auto_reply {
-        cmd.env("CC_CONNECT_AUTO_REPLY_FILE", &p);
+    let inside_zellij = std::env::var_os("ZELLIJ").is_some();
+    let session_running = zellij_session_running(ZELLIJ_SESSION);
+
+    print_exit_hint();
+
+    if session_running {
+        // Add this room as a new tab in the existing session. Always
+        // pass --session so we target cc-connect specifically, even
+        // when the caller is inside a different zellij session.
+        let status = Command::new("zellij")
+            .args(["--session", ZELLIJ_SESSION, "action", "new-tab"])
+            .args(["--layout", &layout_path.to_string_lossy()])
+            .args(["--name", &tab_name])
+            .status()
+            .context("spawn zellij action new-tab")?;
+        if !status.success() {
+            return Err(anyhow!(
+                "zellij action new-tab returned exit {:?}",
+                status.code()
+            ));
+        }
+        if inside_zellij {
+            // We're already inside zellij — assume it's the cc-connect
+            // session and the new tab is now visible. Just return; if
+            // the user happens to be in a different zellij session,
+            // they can `zellij attach cc-connect` themselves.
+            return Ok(());
+        }
+        let err = Command::new("zellij")
+            .arg("attach")
+            .arg(ZELLIJ_SESSION)
+            .exec();
+        Err(anyhow!("exec zellij attach failed: {err}"))
+    } else {
+        // Fresh session — `-n PATH` forces "create new session with this
+        // layout" regardless of any other -session arg semantics.
+        let mut cmd = Command::new("zellij");
+        cmd.arg("--session").arg(ZELLIJ_SESSION);
+        cmd.arg("-n").arg(&layout_path);
+        let err = cmd.exec();
+        Err(anyhow!("exec zellij failed: {err}"))
     }
-
-    // claude_args (e.g. `--model opus`) go into the embedded claude. We
-    // can't push them through zellij's KDL `args` from the Rust side
-    // without sed-replacing the layout file — for v1, expose them via an
-    // env var the user can plumb into a custom layout if they want.
-    // Most users won't pass claude args to `room start` anyway.
-
-    let err = cmd.exec();
-    Err(anyhow!("exec zellij failed: {err}"))
 }
 
 fn exec_tmux(topic_hex: &str, _claude_args: &[String]) -> Result<()> {
     let claude_wrapper = prepare_claude_wrapper()?;
-    let auto_reply = prepare_auto_reply_prompt()?;
+    let _ = prepare_auto_reply_prompt()?;
 
     let tmux_script =
         TMUX_LAUNCHER.replace("__CLAUDE_WRAPPER__", &claude_wrapper.to_string_lossy());
     let script_path = write_tmp_layout("cc-connect", "tmux.sh", &tmux_script)?;
-    // Make it executable.
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
+
+    print_exit_hint();
 
     let mut cmd = Command::new("bash");
     cmd.arg(&script_path);
     cmd.env("CC_CONNECT_ROOM", topic_hex);
-    if let Some(p) = auto_reply {
-        cmd.env("CC_CONNECT_AUTO_REPLY_FILE", &p);
-    }
     let err = cmd.exec();
     Err(anyhow!("exec tmux launcher failed: {err}"))
+}
+
+/// True iff `zellij list-sessions` reports a running session named
+/// `name`. Returns false on any error (zellij not installed, no
+/// sessions running, etc.) — caller treats that as "no session".
+fn zellij_session_running(name: &str) -> bool {
+    let out = Command::new("zellij")
+        .args(["list-sessions", "--no-formatting"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .any(|l| l.split_whitespace().next() == Some(name)),
+        Err(_) => false,
+    }
+}
+
+/// Hint printed to stderr just before exec'ing the multiplexer, so the
+/// user knows how to come back to a clean state without hunting for the
+/// magic incantation.
+fn print_exit_hint() {
+    eprintln!("[room] tip:");
+    eprintln!("  • Quit zellij with Ctrl-q + y (tmux: Ctrl-b + d to detach).");
+    eprintln!("  • `cc-connect clear` stops every chat-daemon + host-bg.");
+    eprintln!("  • `cc-connect uninstall` reverses install.sh entirely.");
 }
 
 /// Per-UID temp directory used for ephemeral, machine-local state shared
