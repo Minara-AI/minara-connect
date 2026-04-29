@@ -12,6 +12,7 @@ pub mod chat_session;
 pub mod doctor;
 pub mod host;
 pub mod host_bg;
+pub mod lifecycle;
 pub mod room;
 pub mod setup;
 pub mod ticket_payload;
@@ -110,6 +111,26 @@ pub enum Command {
     },
     /// Sanity-check the cc-connect installation.
     Doctor,
+    /// Stop every running cc-connect background process (chat-daemons +
+    /// host-bg). Use after `room start` panics, when `chat-daemon list`
+    /// shows stuck daemons, or before re-installing a freshly-built
+    /// binary so the new MCP server takes effect.
+    Clear {
+        /// Also remove `~/.cc-connect/rooms/` (every room's log + files
+        /// + summary). Identity and nicknames are preserved.
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Reverse `install.sh`: clear, strip the cc-connect-hook entry from
+    /// `~/.claude/settings.json`, strip the cc-connect MCP server from
+    /// `~/.claude.json`, and remove the `~/.local/bin` symlinks. Backup
+    /// files are written next to each mutated JSON.
+    Uninstall {
+        /// Also remove `~/.cc-connect/` entirely (identity + nicknames +
+        /// rooms — full factory reset).
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -223,5 +244,7 @@ pub fn run(cli: Cli) -> Result<()> {
             relay,
         } => chat_daemon::run_daemon(&ticket, no_relay, relay.as_deref()),
         Command::Doctor => doctor::run(),
+        Command::Clear { purge } => lifecycle::run_clear(purge),
+        Command::Uninstall { purge } => lifecycle::run_uninstall(purge),
     }
 }
