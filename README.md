@@ -99,7 +99,7 @@ If you'd rather not run the script, the equivalent steps:
 
 ### TUI mode (recommended)
 
-One command, two panes — chat on the left, your Claude Code embedded on the right:
+A tab manager with one tab per room. Each tab owns its own claude PTY + chat session, so switching tabs is instant and lossless — idle claudes keep running quietly.
 
 ```bash
 # Start a brand-new room (spawns a background host daemon, opens the TUI)
@@ -110,20 +110,35 @@ $ ./target/release/cc-connect room join cc1-…
 ```
 
 ```
-┌──────────┬─────────────────────────┐
-│ chat     │  claude code            │
-│  alice   │   $ ls                  │
-│  > body  │   src/  README.md       │
-│          │   $                     │
-│ [type… ] │                         │
-└──────────┴─────────────────────────┘
+┌─ cc-connect [1-9] tab [Ctrl-N] new [Ctrl-W] close [F2/Tab] pane [Ctrl-Y] copy ─┐
+│ [1] team-A·H   [2] design                                                      │  ← tab strip
+├────────────────────────────────────────────────────────────────────────────────┤
+│ ┌─ 🤖 claude · team-A ───────────────┐ ┌─ 💬 chat · team-A ─────────────────┐│
+│ │ $                                  │ │ [bob] use postgres                  ││
+│ │                                    │ │ (@me) [alice] @yijian PR ?          ││
+│ │                                    │ │ › yes, on it                        ││
+│ └────────────────────────────────────┘ └────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Keybindings:**
+
+| Key | Action |
+|---|---|
+| `1`-`9` | Switch to tab N |
+| `Ctrl-N` | Open new tab → `j` to paste a ticket and join |
+| `Ctrl-W` | Close active tab. If you're hosting it, prompts whether to also stop the daemon (default: keep the daemon running so peers can still join via your ticket) |
+| `F2` / `Tab` | Switch focus between chat and claude panes |
+| `Ctrl-Y` | Copy the active tab's ticket to your system clipboard |
+| `Ctrl-Q` | Quit (closes all tabs; keeps host daemons alive) |
+
+The `·H` suffix on a tab label means you started a `host-bg` daemon for that room. Close the tab without stopping the daemon and the room stays joinable for your peers.
 
 **Why this is nicer than running `host` and `chat` separately:**
 
-- The Claude Code in the right pane only sees *this* room's chat — even if you have ten TUI windows open across ten projects, they don't cross-pollinate. Routing is by `CC_CONNECT_ROOM` env var read by the hook.
-- `room start` spawns a `cc-connect host-bg` daemon that survives the TUI window. Close the TUI, the room stays joinable. Stop the daemon explicitly with `cc-connect host-bg stop <topic-prefix>` (or `cc-connect host-bg list` to see what's running).
-- `Tab` switches focus between panes. `Ctrl-Q` quits. Standard Claude Code keybindings work in the right pane.
+- Each tab's claude only sees *its own* room's chat — routing is by `CC_CONNECT_ROOM` env var set per claude PTY, read by both the hook and the MCP server. Ten rooms in one TUI = ten independent contexts, no cross-pollination.
+- `room start` spawns a `cc-connect host-bg` daemon that survives the TUI window. Close the TUI, the room stays joinable. Stop a daemon explicitly with `cc-connect host-bg stop <topic-prefix>` (or `cc-connect host-bg list` to see what's running).
+- Standard Claude Code keybindings work inside the claude pane (the TUI only intercepts the hotkeys above).
 
 ### Host a room (without the TUI)
 
