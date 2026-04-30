@@ -153,11 +153,7 @@ pub fn render(input: &HookInput) -> String {
         }
     }
 
-    // §7.3 step 6 / ADR-0004 hard cap accounts for *all* bytes the hook
-    // ultimately writes to stdout — including any orientation header the
-    // caller will prepend (`external_prefix_bytes`). If we ignore that
-    // length here the concatenated output silently exceeds 8 KiB and
-    // tips into Claude Code's persisted-output fallback path.
+    // ADR-0004 cap covers preamble + caller's external prefix + chat.
     let chat_budget =
         HOOK_OUTPUT_BUDGET.saturating_sub(preamble.len() + input.external_prefix_bytes);
     let chat_block = fit_to_budget(lines, chat_budget);
@@ -420,11 +416,8 @@ fn sanitize_body(s: &str) -> String {
         .bytes()
         .map(|b| if b < 0x20 || b == 0x7F { b' ' } else { b })
         .collect();
-    // The substitution only ever swaps a single ASCII byte (space or
-    // identity), so the byte stream remains valid UTF-8 by construction.
-    // CLAUDE.md hard rule: no expect/unwrap on hook code paths — fall back
-    // to a marker line if the invariant is ever violated by a future
-    // refactor instead of panicking the hook.
+    // Hook must never panic; degrade to a marker if the by-construction
+    // UTF-8 invariant is ever broken by a future refactor.
     String::from_utf8(bytes).unwrap_or_else(|_| String::from("[chatroom] (sanitize fault)"))
 }
 
@@ -449,13 +442,17 @@ fn fit_to_budget(lines: Vec<String>, budget: usize) -> String {
 
     loop {
         if kept.is_empty() {
-            // Pathological case: even a single message exceeds the budget.
-            // Emit only the marker. Conformant senders cap body at 8 KiB
-            // (PROTOCOL §4), so this branch is reachable only via malformed
-            // input or a single 8 KiB body whose envelope tips it over.
-            return marker_line(dropped);
+            // Even the marker itself exceeds budget (e.g. caller's
+            // external preamble already consumed the full 8 KiB cap).
+            // Emit nothing — better silent than tipping the
+            // concatenated stdout above ADR-0004's hard cap.
+            let marker = marker_line(dropped);
+            return if marker.len() <= budget {
+                marker
+            } else {
+                String::new()
+            };
         }
-        // Drop one more from the start (oldest by ULID).
         kept.remove(0);
         dropped += 1;
         let marker = marker_line(dropped);
@@ -771,6 +768,42 @@ mod tests {
             out.len() + 2048 <= HOOK_OUTPUT_BUDGET,
             "render + external prefix must fit in {} (got render={}, external=2048)",
             HOOK_OUTPUT_BUDGET,
+            out.len()
+        );
+    }
+
+    /// Pathological: caller's external prefix already consumed the full
+    /// 8 KiB budget. fit_to_budget MUST emit zero bytes rather than the
+    /// marker — otherwise concatenated stdout still exceeds ADR-0004's
+    /// hard cap.
+    #[test]
+    fn fit_to_budget_zero_budget_emits_nothing() {
+        let lines = vec!["a".repeat(100) + "\n"];
+        let out = fit_to_budget(lines, 0);
+        assert_eq!(out, "", "zero budget MUST emit nothing, got: {out:?}");
+    }
+
+    /// External-prefix exhaustion: prefix == HOOK_OUTPUT_BUDGET means
+    /// chat_budget = 0; render must not slip the marker line through
+    /// because the marker itself wouldn't fit either.
+    #[test]
+    fn external_prefix_at_full_budget_emits_no_chat_block() {
+        let nm = nicks(&[(A_PUBKEY, "alice")]);
+        let msgs = vec![make(&ulid(1), A_PUBKEY, 0, "hi")];
+        let rooms = one_room("aabb11", msgs);
+        let out = render(&HookInput {
+            rooms: &rooms,
+            nicknames: &nm,
+            rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"),
+            self_nick: None,
+            room_summaries: empty_map(),
+            room_file_indexes: empty_map(),
+            self_pubkey: None,
+            external_prefix_bytes: HOOK_OUTPUT_BUDGET,
+        });
+        assert!(
+            out.is_empty(),
+            "render must not exceed concatenated cap, got {} bytes",
             out.len()
         );
     }

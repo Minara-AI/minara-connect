@@ -25,6 +25,7 @@
 //! per-step failures so a half-broken install can still be cleaned up.
 
 use anyhow::{Context, Result};
+use cc_connect_core::posix::cc_connect_uid_dir;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -93,11 +94,8 @@ pub fn run_clear(purge: bool) -> Result<()> {
                 rooms_dir.display()
             );
         }
-        // Per-UID tmp dir holds active-rooms PID files + IPC sockets +
-        // bootstrap scratch (claude-wrap.sh, auto-reply.md). After a
-        // successful daemon shutdown above its contents should already
-        // be unlinked by the daemons' Drop guards; we sweep the tree
-        // anyway to handle daemons that crashed without cleanup.
+        // Sweep the per-UID tmp tree in case a daemon was SIGKILL'd
+        // and skipped its Drop-guard cleanup. See `purge_tmp_uid_dir`.
         purge_tmp_uid_dir();
     }
 
@@ -175,16 +173,8 @@ pub fn run_uninstall(purge: bool) -> Result<()> {
                 cc_dir.display()
             );
         }
-        // Sweep the per-UID tmp tree (active-rooms PID files, IPC sockets,
-        // bootstrap scratch). The daemons we just stopped should have
-        // unlinked their own state via Drop, but a SIGKILL'd daemon
-        // would leave debris that survives forever otherwise.
         purge_tmp_uid_dir();
-        // Sweep the timestamped JSON backups install.sh / setup.rs /
-        // lifecycle.rs leave behind. Without this every reinstall +
-        // uninstall round-trip accumulates more files in `~/.claude/`
-        // and `~/`. They are not interesting to anyone post-uninstall.
-        purge_claude_backup_files();
+        purge_claude_backup_files(&home_dir());
     } else if cc_dir.exists() {
         eprintln!(
             "[uninstall] kept {} — re-run with --purge to wipe identity + nicknames + rooms",
@@ -613,24 +603,14 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Recursively wipe `$TMPDIR/cc-connect-<uid>/`. Best-effort: missing dir is
-/// silently a no-op, and a non-fatal failure is reported but does not
-/// abort the surrounding clear/uninstall.
-///
-/// The chat_session and host-bg daemons normally remove their own state
-/// (PID files, IPC sockets, bootstrap scratch) on Drop / signal handlers.
-/// This sweep covers the SIGKILL / power-loss case where the Drop never
-/// ran and debris would otherwise persist across reboots.
+/// Recursively wipe `$TMPDIR/cc-connect-<uid>/` AND `/tmp/cc-connect-<uid>/`
+/// (macOS distinguishes the two; on Linux they collapse). Best-effort —
+/// missing dirs are no-ops. Sweeps debris from SIGKILL'd daemons whose
+/// Drop guards never ran.
 fn purge_tmp_uid_dir() {
     let uid = rustix::process::geteuid().as_raw();
-    // chat_session writes its IPC sockets under hard-coded `/tmp` (see
-    // `ipc_socket_path` — the macOS sun_len constraint forbids the
-    // longer `std::env::temp_dir()` prefix). The active-rooms PID files
-    // sit under `std::env::temp_dir()` (which on macOS is
-    // `/var/folders/...`). Both share the same `cc-connect-<uid>`
-    // suffix; sweep both.
     let mut candidates = vec![
-        std::env::temp_dir().join(format!("cc-connect-{uid}")),
+        cc_connect_uid_dir(),
         PathBuf::from(format!("/tmp/cc-connect-{uid}")),
     ];
     candidates.sort();
@@ -644,48 +624,44 @@ fn purge_tmp_uid_dir() {
     }
 }
 
-/// Sweep `~/.claude.json.bak.*` and `~/.claude/*.json.bak.*` so the
-/// timestamped backups install.sh / setup.rs / lifecycle.rs leave
-/// behind don't accumulate forever. Best-effort.
-fn purge_claude_backup_files() {
-    let home = home_dir();
-    let mut removed = 0usize;
-    // Top-level `.claude.json.bak.<ts>` (one entry per JSON edit).
-    if let Ok(entries) = std::fs::read_dir(&home) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let s = match name.to_str() {
-                Some(s) => s,
-                None => continue,
-            };
-            if s.starts_with(".claude.json.bak.") {
-                if let Err(e) = std::fs::remove_file(entry.path()) {
-                    eprintln!("  warn: rm {}: {e}", entry.path().display());
-                } else {
-                    removed += 1;
-                }
-            }
-        }
+/// Whether `name` looks like a cc-connect-issued timestamped JSON backup —
+/// i.e. install.sh / setup.rs / lifecycle.rs's `<basename>.json.bak.<digits>`
+/// convention, or the bare-suffix `<basename>.json.bak` legacy form. The
+/// digit suffix matters: third-party tools sometimes write
+/// `myproject.json.bak.tag` and we must not touch those.
+fn is_cc_connect_backup(name: &str) -> bool {
+    if let Some(rest) = name.strip_prefix(".claude.json.bak.") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
     }
-    // `~/.claude/*.json.bak.<ts>` (settings.json + .claude.json siblings).
-    let claude_dir = home.join(".claude");
-    if let Ok(entries) = std::fs::read_dir(&claude_dir) {
+    if let Some(idx) = name.rfind(".json.bak.") {
+        let suffix = &name[idx + ".json.bak.".len()..];
+        return !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit());
+    }
+    name.ends_with(".json.bak")
+}
+
+/// Sweep `<home>/.claude.json.bak.<ts>` and `<home>/.claude/*.json.bak.<ts>`.
+/// `home` is passed in so tests can run against a temp dir without
+/// mutating the process-global `HOME` env var (cargo runs unit tests
+/// concurrently — set_var would race other tests).
+fn purge_claude_backup_files(home: &Path) {
+    let mut removed = 0usize;
+    let dirs = [home.to_path_buf(), home.join(".claude")];
+    for dir in &dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let s = match name.to_str() {
-                Some(s) => s,
-                None => continue,
-            };
-            // Match `<basename>.json.bak.<digits>` — the install.sh /
-            // setup.rs / lifecycle.rs convention. Bare `.json.bak`
-            // without a timestamp suffix is also accepted (older
-            // install.sh versions used it).
-            if s.contains(".json.bak.") || s.ends_with(".json.bak") {
-                if let Err(e) = std::fs::remove_file(entry.path()) {
-                    eprintln!("  warn: rm {}: {e}", entry.path().display());
-                } else {
-                    removed += 1;
-                }
+            let Some(s) = name.to_str() else { continue };
+            if !is_cc_connect_backup(s) {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                eprintln!("  warn: rm {}: {e}", entry.path().display());
+            } else {
+                removed += 1;
             }
         }
     }
@@ -780,61 +756,44 @@ mod tests {
         assert_eq!(v, json!({"theme": "dark"}));
     }
 
-    /// BLOCKER fix regression: `purge_claude_backup_files` MUST find and
-    /// remove every `*.json.bak.*` file install.sh / setup.rs /
-    /// lifecycle.rs leaves behind, in BOTH `~/.claude/` and `~/`.
-    ///
-    /// Without this, every install + uninstall round trip silently
-    /// accumulates more files in the user's home — CLAUDE.md
-    /// "Release checklist" treats that accumulation as a release blocker.
+    /// `purge_claude_backup_files` MUST find every install.sh / setup.rs /
+    /// lifecycle.rs-issued `<basename>.json.bak.<ts>` (plus the legacy
+    /// bare-suffix form), MUST leave the live config files alone, and
+    /// MUST NOT delete third-party files that happen to share the
+    /// `.json.bak.` substring without the trailing digit timestamp
+    /// (e.g. another tool's `myapp.json.bak.snapshot1`).
     #[test]
-    fn purge_claude_backups_removes_dated_files() {
-        // Run inside a fake HOME so we don't touch the developer's
-        // real ~/.claude/.
+    fn purge_claude_backups_removes_only_dated_cc_connect_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let saved_home = std::env::var_os("HOME");
-        // SAFETY: tests run single-threaded inside this binary's test
-        // mod; we restore HOME at the end. The set_var is required
-        // because purge_claude_backup_files reads HOME via home_dir().
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-        }
+        let home = tmp.path();
 
-        // Top-level .claude.json.bak.<ts>
-        let top1 = tmp.path().join(".claude.json.bak.1700000000");
-        let top2 = tmp.path().join(".claude.json.bak.1700099999");
+        let top1 = home.join(".claude.json.bak.1700000000");
+        let top2 = home.join(".claude.json.bak.1700099999");
         std::fs::write(&top1, b"{}").unwrap();
         std::fs::write(&top2, b"{}").unwrap();
-        // Sibling under ~/.claude/
-        let claude = tmp.path().join(".claude");
+        let claude = home.join(".claude");
         std::fs::create_dir_all(&claude).unwrap();
         let s1 = claude.join("settings.json.bak.1700000001");
-        let s2 = claude.join("settings.json.bak"); // legacy bare suffix
+        let s2 = claude.join("settings.json.bak");
         std::fs::write(&s1, b"{}").unwrap();
         std::fs::write(&s2, b"{}").unwrap();
-        // Files we MUST NOT touch.
-        let keep1 = tmp.path().join(".claude.json"); // live config
-        let keep2 = claude.join("settings.json"); // live settings
-        let keep3 = claude.join("notes.txt"); // unrelated
+
+        let keep1 = home.join(".claude.json");
+        let keep2 = claude.join("settings.json");
+        let keep3 = claude.join("notes.txt");
+        let keep4 = claude.join("myproject.json.bak.snapshot");
         std::fs::write(&keep1, b"{}").unwrap();
         std::fs::write(&keep2, b"{}").unwrap();
         std::fs::write(&keep3, b"hi").unwrap();
+        std::fs::write(&keep4, b"{}").unwrap();
 
-        purge_claude_backup_files();
+        purge_claude_backup_files(home);
 
         for gone in [&top1, &top2, &s1, &s2] {
             assert!(!gone.exists(), "expected {} to be purged", gone.display());
         }
-        for kept in [&keep1, &keep2, &keep3] {
+        for kept in [&keep1, &keep2, &keep3, &keep4] {
             assert!(kept.exists(), "MUST NOT have removed {}", kept.display());
-        }
-
-        // Restore.
-        unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
         }
     }
 

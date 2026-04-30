@@ -90,16 +90,20 @@ fn run() -> Result<()> {
     let self_pubkey = read_self_pubkey();
     let room_summaries = read_room_summaries(&rooms_base, rooms.keys());
     let room_file_indexes = read_room_file_indexes(&rooms_base, rooms.keys());
-    // Build the per-prompt orientation header up front so its byte length
-    // can be charged against the 8 KiB cap inside `render`. ADR-0004 /
-    // PROTOCOL §7.3 step 6 cap covers ALL bytes the hook ultimately
-    // writes to stdout — header included. Computing the header before
-    // render means the chat-block fit loop accounts for it.
-    let has_for_you = rooms
-        .values()
-        .flatten()
-        .any(|m| hook_format::is_owner_directive(m, self_pubkey.as_deref(), self_nick.as_deref()));
-    let header = build_orientation_header(&topic_ids, self_nick.as_deref(), has_for_you);
+    // Quiet room (no unread messages anywhere) → skip the ~700 B header
+    // alloc and the for-you scan. This is the common case for every
+    // prompt; render() will return empty and we'd discard the header
+    // anyway. ADR-0004 / PROTOCOL §7.3 step 6: when we DO emit a
+    // header, charge its byte length against the 8 KiB chat budget.
+    let any_unread = rooms.values().any(|v| !v.is_empty());
+    let header = if any_unread {
+        let has_for_you = rooms.values().flatten().any(|m| {
+            hook_format::is_owner_directive(m, self_pubkey.as_deref(), self_nick.as_deref())
+        });
+        build_orientation_header(&topic_ids, self_nick.as_deref(), has_for_you)
+    } else {
+        String::new()
+    };
     let body = hook_format::render(&hook_format::HookInput {
         rooms: &rooms,
         nicknames: &nicknames,
@@ -110,8 +114,6 @@ fn run() -> Result<()> {
         self_pubkey: self_pubkey.as_deref(),
         external_prefix_bytes: header.len(),
     });
-    // Empty body = no unread chat. Stay silent (no header either) so the
-    // hook doesn't spam Claude on every prompt when the room is quiet.
     let output = if body.is_empty() {
         String::new()
     } else {

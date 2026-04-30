@@ -8,7 +8,7 @@
 //! See `PROTOCOL.md` §5 (writer locks), §7.3 step 8 (cursor lock + race),
 //! §7.4 (lock unification rationale), §8 (active-rooms lstat strictness).
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
@@ -48,22 +48,10 @@ pub(crate) fn release_lock(file: &File) -> Result<()> {
     fcntl_lock(file.as_fd(), FlockOperation::Unlock).map_err(|e| anyhow!("fcntl lock release: {e}"))
 }
 
-/// Ensure `path` is a non-symlink directory at mode `0700`, creating it
-/// atomically with that mode if missing.
-///
-/// PROTOCOL.md §8 ("active-rooms") mandates that every implementation
-/// "MUST `lstat` the parent directory and refuse if (a) it is a symlink,
-/// (b) it is not a directory, or (c) its mode is not exactly `0700`."
-/// The reader path in `cc-connect-hook` already enforces this; the writer
-/// path used by chat_session must apply the same check or a hostile
-/// co-tenant can pre-create the path as a symlink to their own watched
-/// directory and trick `chmod 0700` into hardening the wrong target.
-///
-/// Behaviour:
-///   - missing → `mkdir(path, 0o700)` via rustix (no umask race, atomic).
-///   - present and a symlink → bail (`REFUSE_SYMLINK`).
-///   - present but not a directory → bail (`REFUSE_NOT_DIR`).
-///   - present, mode != 0700 → tighten via `chmod` (we own the path).
+/// PROTOCOL.md §8: ensure `path` is a non-symlink directory at mode 0700,
+/// creating it with rustix `mkdir(0o700)` (no umask race) when missing.
+/// Refuses on symlink, non-dir, OR mode != 0700; the spec's recovery is
+/// `rm -rf "$TMPDIR/cc-connect-$UID/" && retry`.
 pub fn ensure_secure_dir(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(meta) => {
@@ -81,14 +69,16 @@ pub fn ensure_secure_dir(path: &Path) -> Result<()> {
             }
             let mode = meta.permissions().mode() & 0o777;
             if mode != 0o700 {
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-                    .with_context(|| format!("chmod 0700 {}", path.display()))?;
+                bail!(
+                    "REFUSE_MODE: {} has mode {:04o} (expected 0700) — possible co-tenant attack; \
+                     recover with `rm -rf {}` then re-run",
+                    path.display(),
+                    mode,
+                    path.display()
+                );
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Atomic create-with-mode. Avoids the
-            // `mkdir`-then-`chmod`-via-umask race that lets a hostile
-            // process win between the two calls.
             use rustix::fs::{mkdir, Mode};
             mkdir(path, Mode::from_bits_truncate(0o700))
                 .map_err(|e| anyhow!("mkdir {} (mode 0700): {e}", path.display()))?;
@@ -96,6 +86,17 @@ pub fn ensure_secure_dir(path: &Path) -> Result<()> {
         Err(e) => return Err(anyhow!("lstat {}: {e}", path.display())),
     }
     Ok(())
+}
+
+/// `$TMPDIR/cc-connect-<uid>/` — the per-UID root that holds the active-rooms
+/// PID directory + (when needed) IPC sockets directory. Centralised here
+/// so chat_session, lifecycle, doctor, room, hook, and host-bg agree on
+/// the same path. The IPC socket binder is the one exception: it
+/// hard-codes `/tmp/cc-connect-<uid>/sockets/` because macOS's user-temp
+/// prefix overflows SUN_LEN (104) once the topic_id_hex is appended.
+pub fn cc_connect_uid_dir() -> std::path::PathBuf {
+    let uid = rustix::process::geteuid().as_raw();
+    std::env::temp_dir().join(format!("cc-connect-{uid}"))
 }
 
 #[cfg(test)]
@@ -113,15 +114,15 @@ mod tests {
     }
 
     #[test]
-    fn ensure_secure_dir_tightens_loose_mode() {
+    fn ensure_secure_dir_refuses_loose_mode() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("loose");
         std::fs::create_dir(&p).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        ensure_secure_dir(&p).unwrap();
-        assert_eq!(
-            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
-            0o700
+        let err = ensure_secure_dir(&p).unwrap_err();
+        assert!(
+            err.to_string().contains("REFUSE_MODE"),
+            "expected REFUSE_MODE refusal, got: {err}"
         );
     }
 

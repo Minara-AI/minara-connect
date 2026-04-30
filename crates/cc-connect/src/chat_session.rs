@@ -21,7 +21,7 @@ use cc_connect_core::{
     identity::Identity,
     log_io,
     message::Message,
-    posix::ensure_secure_dir,
+    posix::{cc_connect_uid_dir, ensure_secure_dir},
     rate_limit::{RateLimitDecision, RateLimiter},
     ticket::decode_room_code,
 };
@@ -120,17 +120,9 @@ impl MentionState {
         })
     }
 
-    /// Record an @-mention. Buffer cap-evicts oldest; broadcast send is
-    /// best-effort (no waiters → ignored).
-    ///
-    /// Mutex poison is treated as "ignore the panicked thread's mid-write
-    /// state and recover" via `into_inner` rather than `expect`. CLAUDE.md
-    /// hard rule: code paths the IPC server (and indirectly the hook)
-    /// reaches must never panic — a poison here would otherwise crash
-    /// the chat_session task and take the whole room offline for that
-    /// peer. The buffer is a simple ring of mentions; the worst case of
-    /// recovering a partial write is one duplicate or skipped mention,
-    /// which is harmless.
+    /// Record an @-mention. Buffer cap-evicts oldest. Mutex poison is
+    /// recovered via `into_inner` — chat_session must never panic the
+    /// IPC server task or the room goes offline.
     fn push(&self, ev: MentionEvent) {
         {
             let mut buf = self
@@ -274,15 +266,7 @@ async fn run_session(
     let topic_handle = gossip.subscribe_and_join(topic, peer_ids).await?;
     let (sender, mut receiver) = topic_handle.split();
 
-    // 7. Backfill (PROTOCOL.md §6.2 + ADR-0002).
-    //
-    // PROTOCOL §6.2 mandates a 5-second per-attempt timeout AND a
-    // 10-second aggregate cap that holds regardless of how many peers
-    // were attempted. We walk every bootstrap peer (skipping self) with
-    // try_backfill_from (which already enforces the per-attempt 5s),
-    // stop on the first success, and bail when the aggregate budget is
-    // exhausted. Self-spoofed responses are dropped inside backfill.rs
-    // via the `pubkey_string` we pass through.
+    // 7. Backfill — PROTOCOL §6.2: 5s per-attempt + 10s aggregate hard cap.
     let backfill_marker = {
         use std::time::{Duration, Instant};
         const AGGREGATE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -295,28 +279,53 @@ async fn run_session(
             .filter(|p| p.id != endpoint.id())
             .collect();
         for peer in &candidates {
-            if started.elapsed() >= AGGREGATE_TIMEOUT {
+            let remaining = AGGREGATE_TIMEOUT.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
                 break;
             }
-            let outcome = try_backfill_from(
-                &endpoint,
-                &store,
-                peer,
-                None,
-                &log_path,
-                &files_dir,
-                &pubkey_string,
+            // Cap each attempt at min(per-attempt, remaining-aggregate)
+            // so the very-last try cannot push total elapsed past 10s.
+            let outcome = match tokio::time::timeout(
+                remaining,
+                try_backfill_from(
+                    &endpoint,
+                    &store,
+                    peer,
+                    None,
+                    &log_path,
+                    &files_dir,
+                    &pubkey_string,
+                ),
             )
-            .await;
+            .await
+            {
+                Ok(o) => o,
+                Err(_) => BackfillOutcome::Timeout,
+            };
             match outcome {
-                BackfillOutcome::Filled { appended } if appended > 0 => {
-                    outcome_marker = Some(Some(format!(
-                        "[chatroom] (backfilled {appended} message{} from peer)",
-                        if appended == 1 { "" } else { "s" }
-                    )));
+                BackfillOutcome::Filled {
+                    appended,
+                    spoof_dropped,
+                } => {
+                    if spoof_dropped > 0 {
+                        let _ = display_tx
+                            .send(DisplayLine::Warn(format!(
+                                "[chat] backfill: dropped {spoof_dropped} self-spoofed message{} from peer",
+                                if spoof_dropped == 1 { "" } else { "s" },
+                            )))
+                            .await;
+                    }
+                    outcome_marker = Some(if appended > 0 {
+                        Some(format!(
+                            "[chatroom] (backfilled {appended} message{} from peer)",
+                            if appended == 1 { "" } else { "s" }
+                        ))
+                    } else {
+                        None
+                    });
                     break;
                 }
-                BackfillOutcome::Filled { .. } | BackfillOutcome::Empty => {
+                BackfillOutcome::Empty => {
                     outcome_marker = Some(None);
                     break;
                 }
@@ -915,17 +924,6 @@ pub(crate) async fn fetch_and_export_blob(
         .with_context(|| format!("export {} → {}", hash, target.display()))?;
     let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
     Ok(())
-}
-
-/// Per-UID `$TMPDIR/cc-connect-<uid>/` root that holds the active-rooms PID
-/// directory and the IPC socket directory. Both subdirectories must be
-/// 0700 (PROTOCOL §8 strictness; ADR-0003); a hostile co-tenant who
-/// pre-creates them as symlinks could otherwise observe IPC traffic or
-/// hijack the active-room marker. `ensure_secure_dir` does the lstat-
-/// strict create for both the parent and the named subdir.
-fn cc_connect_uid_dir() -> PathBuf {
-    let uid = rustix::process::geteuid().as_raw();
-    std::env::temp_dir().join(format!("cc-connect-{uid}"))
 }
 
 fn pid_file_path(topic_id_hex: &str) -> Result<PathBuf> {

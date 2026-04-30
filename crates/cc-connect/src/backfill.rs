@@ -133,8 +133,14 @@ async fn handle_one(log_path: &Path, connection: Connection) -> Result<()> {
 /// Outcome of a single Backfill attempt.
 #[derive(Debug)]
 pub enum BackfillOutcome {
-    /// Got a response; this many Messages were appended (post-dedup).
-    Filled { appended: usize },
+    /// Got a response. `appended` Messages persisted; `spoof_dropped`
+    /// counts entries we refused because their `author` matched our own
+    /// Pubkey (PROTOCOL §4 self-spoof guard) — caller surfaces a UI
+    /// warning when this is non-zero.
+    Filled {
+        appended: usize,
+        spoof_dropped: usize,
+    },
     /// Peer answered but the response was empty (peer's log had nothing newer).
     Empty,
     /// Per-attempt timeout fired.
@@ -175,8 +181,7 @@ pub async fn try_backfill_from(
     )
     .await
     {
-        Ok(Ok(BackfillOutcome::Filled { appended })) => BackfillOutcome::Filled { appended },
-        Ok(Ok(other)) => other,
+        Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => BackfillOutcome::Failed(format!("{e:#}")),
         Err(_) => BackfillOutcome::Timeout,
     }
@@ -230,18 +235,14 @@ async fn attempt(
         .collect();
 
     let mut appended = 0;
+    let mut spoof_dropped = 0usize;
     for msg in response.messages {
-        // PROTOCOL §4 self-spoof prevention: drop any backfilled Message
-        // whose `author` equals the receiver's own Pubkey. Without this a
-        // malicious responder could inject "history" attributed to us and
-        // every Hook fire would render it as if we'd typed it. The check
-        // is intentionally cheap (string compare) and runs before the id
-        // de-dup so a fresh-id forgery is also caught.
+        // PROTOCOL §4 self-spoof guard: a malicious responder must not
+        // be able to inject "history" attributed to us. Counted (not
+        // logged here) so the caller surfaces a single visible warning
+        // through the chat UI's normal Warn channel.
         if !self_pubkey.is_empty() && msg.author == self_pubkey {
-            eprintln!(
-                "[backfill] dropped self-authored message from peer (id={}) — possible spoof",
-                msg.id
-            );
+            spoof_dropped += 1;
             continue;
         }
         if existing.contains(&msg.id) {
@@ -264,7 +265,10 @@ async fn attempt(
         log_io::append(&mut log_file, &msg).context("append backfilled Message")?;
         appended += 1;
     }
-    Ok(BackfillOutcome::Filled { appended })
+    Ok(BackfillOutcome::Filled {
+        appended,
+        spoof_dropped,
+    })
 }
 
 // ---------------------------------------------------------------------------
