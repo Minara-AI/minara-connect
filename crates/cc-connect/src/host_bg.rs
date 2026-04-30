@@ -27,9 +27,11 @@
 //! - on SIGTERM/SIGINT: clean up the PID file then exit 0.
 
 use anyhow::{anyhow, bail, Context, Result};
-use cc_connect_core::ticket::encode_room_code;
+use cc_connect_core::{log_io, message::Message, ticket::encode_room_code};
+use futures_lite::StreamExt;
 use iroh::{endpoint::RelayMode, Endpoint, RelayMap, SecretKey};
 use iroh_gossip::{
+    api::Event,
     net::{Gossip, GOSSIP_ALPN},
     proto::TopicId,
 };
@@ -42,6 +44,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::backfill::{BackfillHandler, BACKFILL_ALPN};
 use crate::ticket_payload::TicketPayload;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -313,17 +316,41 @@ async fn daemon_async(relay: Option<&str>) -> Result<()> {
     let mut topic_bytes = [0u8; 32];
     getrandom::getrandom(&mut topic_bytes).map_err(|e| anyhow!("OS random for topic: {e}"))?;
     let topic = TopicId::from_bytes(topic_bytes);
+    let topic_hex_for_log = topic_to_hex(&topic);
+    let log_path = home_dir()
+        .join(".cc-connect")
+        .join("rooms")
+        .join(&topic_hex_for_log)
+        .join("log.jsonl");
 
     let gossip = Gossip::builder().spawn(endpoint.clone());
+    // Register BACKFILL_ALPN against the shared log so joiners' backfill
+    // RPC against the daemon's NodeId (the only one in the ticket)
+    // returns history. Without this, the joiner's dial fails ALPN
+    // negotiation with "peer doesn't support any known protocol" and the
+    // joined-late marker fires every time. The log path is shared with
+    // the user's TUI / chat-daemon (same `~/.cc-connect/rooms/<topic>/`
+    // root); fcntl locking in log_io serialises writes.
+    let backfill_handler = BackfillHandler::new(log_path.clone());
     let _router = iroh::protocol::Router::builder(endpoint.clone())
         .accept(GOSSIP_ALPN, gossip.clone())
+        .accept(BACKFILL_ALPN, backfill_handler)
         .spawn();
 
     endpoint.online().await;
 
     // Subscribe to our own topic so joiners can bootstrap (the fix from
     // 64eabb5; otherwise `subscribe_and_join` on the joiner side hangs).
-    let _topic_handle = gossip.subscribe(topic, vec![]).await?;
+    let topic_handle = gossip.subscribe(topic, vec![]).await?;
+    // Active-drain the receiver (PROTOCOL §6.1 forwarding correctness):
+    // a passive subscriber that never reads its receiver causes
+    // iroh-gossip to back-pressure and drop forwards, so peers connected
+    // to the daemon as their only bootstrap can lose messages
+    // asymmetrically. Drain in a background task and append unseen
+    // Messages to the shared log.jsonl so the user's TUI hook still sees
+    // them on the next prompt even if its own gossip listener missed
+    // them. Dedup by id (PROTOCOL §5) keeps the log consistent.
+    spawn_gossip_drain(topic_handle, log_path.clone());
 
     let our_addr = endpoint.addr();
     let payload = TicketPayload {
@@ -372,12 +399,59 @@ async fn daemon_async(relay: Option<&str>) -> Result<()> {
         _ = sigint.recv() => {},
     }
 
-    // Clean up.
+    // Clean up. The gossip-drain task ends when the gossip handle drops.
     let _ = std::fs::remove_file(&pid_path);
-    drop(_topic_handle);
     drop(gossip);
     drop(endpoint);
     Ok(())
+}
+
+/// Active receiver drain for the daemon's topic subscription. Without
+/// this, iroh-gossip treats the daemon as a back-pressured peer and its
+/// forwards become unreliable — a joiner whose only bootstrap is the
+/// daemon may never see another peer's broadcasts even though the gossip
+/// mesh is nominally connected (asymmetric visibility, observed pre-fix).
+///
+/// We append every well-formed Message to the shared `log.jsonl` for the
+/// topic. `log_io::append` is fcntl-locked and dedup-safe, so concurrent
+/// writes from the user's TUI / chat-daemon for the same room don't
+/// corrupt. The daemon never displays anything — this drain exists for
+/// (a) gossip-protocol back-pressure, (b) keeping the log warm so a
+/// freshly-launched TUI's hook can render history immediately.
+fn spawn_gossip_drain(
+    handle: iroh_gossip::api::GossipTopic,
+    log_path: PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let (_sender, mut receiver) = handle.split();
+        let mut log_file = match log_io::open_or_create_log(&log_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[host-bg] open log {}: {e:#}", log_path.display());
+                return;
+            }
+        };
+        while let Some(event) = receiver.next().await {
+            let payload: Vec<u8> = match event {
+                Ok(Event::Received(m)) => m.content.to_vec(),
+                Ok(_) => continue,
+                Err(e) => {
+                    eprintln!("[host-bg] gossip stream error: {e}");
+                    continue;
+                }
+            };
+            let msg = match Message::from_wire_bytes(&payload) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("[host-bg] dropped malformed Message: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) = log_io::append(&mut log_file, &msg) {
+                eprintln!("[host-bg] append Message {} failed: {e:#}", msg.id);
+            }
+        }
+    })
 }
 
 // ---------- helpers ---------------------------------------------------------
