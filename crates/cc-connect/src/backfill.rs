@@ -180,12 +180,14 @@ async fn handle_one(log_path: &Path, connection: Connection) -> Result<()> {
 /// Outcome of a single Backfill attempt.
 #[derive(Debug)]
 pub enum BackfillOutcome {
-    /// Got a response. `appended` Messages persisted; `spoof_dropped`
-    /// counts entries we refused because their `author` matched our own
-    /// Pubkey (PROTOCOL §4 self-spoof guard) — caller surfaces a UI
-    /// warning when this is non-zero.
+    /// Got a response. `appended` is the list of Messages persisted in
+    /// id-ascending order — the caller surfaces them through the chat
+    /// UI's normal incoming-message lane so the user sees history, not
+    /// just the marker line. `spoof_dropped` counts entries we refused
+    /// because their `author` matched our own Pubkey (PROTOCOL §4
+    /// self-spoof guard) — caller surfaces a UI warning when non-zero.
     Filled {
-        appended: usize,
+        appended: Vec<Message>,
         spoof_dropped: usize,
     },
     /// Peer answered but the response was empty (peer's log had nothing newer).
@@ -281,7 +283,7 @@ async fn attempt(
         .map(|m| m.id)
         .collect();
 
-    let mut appended = 0;
+    let mut appended: Vec<Message> = Vec::new();
     let mut spoof_dropped = 0usize;
     for msg in response.messages {
         // PROTOCOL §4 self-spoof guard: a malicious responder must not
@@ -310,7 +312,7 @@ async fn attempt(
             }
         }
         log_io::append(&mut log_file, &msg).context("append backfilled Message")?;
-        appended += 1;
+        appended.push(msg);
     }
     Ok(BackfillOutcome::Filled {
         appended,

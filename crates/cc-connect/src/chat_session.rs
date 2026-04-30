@@ -267,6 +267,10 @@ async fn run_session(
     let (sender, mut receiver) = topic_handle.split();
 
     // 7. Backfill — PROTOCOL §6.2: 5s per-attempt + 10s aggregate hard cap.
+    // History messages captured here are emitted to the chat pane AFTER
+    // the join banner + marker line so the rendered order is:
+    //   Joined room … / You are: … / (backfilled N messages) / msg1 / msg2 / …
+    let mut backfilled_to_display: Vec<Message> = Vec::new();
     let backfill_marker = {
         use std::time::{Duration, Instant};
         const AGGREGATE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -315,10 +319,14 @@ async fn run_session(
                             )))
                             .await;
                     }
-                    outcome_marker = Some(if appended > 0 {
+                    let count = appended.len();
+                    // Stash for emission after the join banner + marker
+                    // line, so the chat pane orders history below them.
+                    backfilled_to_display = appended;
+                    outcome_marker = Some(if count > 0 {
                         Some(format!(
-                            "[chatroom] (backfilled {appended} message{} from peer)",
-                            if appended == 1 { "" } else { "s" }
+                            "[chatroom] (backfilled {count} message{} from peer)",
+                            if count == 1 { "" } else { "s" }
                         ))
                     } else {
                         None
@@ -416,6 +424,27 @@ async fn run_session(
         .await;
     if let Some(marker) = backfill_marker {
         let _ = display_tx.send(DisplayLine::Marker(marker)).await;
+    }
+    // Emit each backfilled Message through the Incoming lane so the
+    // chat pane shows real history, not just the marker line.
+    for msg in backfilled_to_display.drain(..) {
+        let nick_short: String = match msg.nick.as_deref() {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => msg.author.chars().take(8).collect(),
+        };
+        let body: String = if msg.kind == cc_connect_core::message::KIND_FILE_DROP {
+            format!("dropped {}", msg.body)
+        } else {
+            msg.body.replace(['\n', '\r', '\t'], " ")
+        };
+        let mentions_me = line_mentions_me(&body, self_nick.as_deref());
+        let _ = display_tx
+            .send(DisplayLine::Incoming {
+                nick_short,
+                body,
+                mentions_me,
+            })
+            .await;
     }
 
     // 11. Spawn the gossip listener task. It owns its own File handle to the
