@@ -12,6 +12,7 @@ pub mod chat_session;
 pub mod doctor;
 pub mod host;
 pub mod host_bg;
+pub mod launcher_paths;
 pub mod lifecycle;
 pub mod room;
 pub mod setup;

@@ -189,20 +189,19 @@ async fn enter_tui(
     hosting: bool,
 ) -> Result<()> {
     let topic_hex = topic_hex_from_ticket(&ticket)?;
-    let claude_bin = std::env::var("CC_CONNECT_CLAUDE_BIN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "claude".to_string());
-    let mut claude_argv = vec![claude_bin];
+    // Route claude through the same `claude-wrap.sh` the zellij + tmux
+    // paths use. The wrapper does the auto-reply + bootstrap + permission
+    // bypass plumbing in one place; the TUI used to re-implement that
+    // logic in Rust which drifted from the shell version. argv shape:
+    //   [wrapper, topic_hex_hex, ...user_claude_args]
+    // The wrapper consumes the topic-hex arg, exports CC_CONNECT_ROOM,
+    // and exec's `${CC_CONNECT_CLAUDE_BIN:-claude}` with the rest.
+    let wrapper = cc_connect::launcher_paths::prepare_claude_wrapper()
+        .context("prepare claude wrapper for TUI")?;
+    let _ = cc_connect::launcher_paths::prepare_auto_reply_prompt()?;
+    let _ = cc_connect::launcher_paths::prepare_bootstrap_prompt()?;
+    let mut claude_argv = vec![wrapper.to_string_lossy().into_owned(), topic_hex.clone()];
     claude_argv.extend(claude_args);
-
-    // Auto-reply + bootstrap (matches the wrapper script used by
-    // exec_zellij / exec_tmux). When room.rs's exec_tui_fallback wrote
-    // both prompt files and set the env vars, prepend
-    // `--append-system-prompt <content>` and append the bootstrap as
-    // the initial user prompt. This is what makes the TUI path also
-    // auto-greet + enter the listener loop on launch.
-    apply_auto_reply_bootstrap(&mut claude_argv);
 
     let claude_cwd: Option<PathBuf> = std::env::current_dir().ok();
 
@@ -228,47 +227,4 @@ fn topic_hex_from_ticket(ticket: &str) -> Result<String> {
         let _ = write!(hex, "{b:02x}");
     }
     Ok(hex)
-}
-
-/// If the launcher (`cc-connect/src/room.rs::exec_tui_fallback`) wrote
-/// both the auto-reply system prompt and the bootstrap user prompt, and
-/// the user hasn't opted out via `CC_CONNECT_NO_AUTO_REPLY`, prepend
-/// `--append-system-prompt <content>` to claude's argv (after the bin)
-/// and append the bootstrap content as the trailing positional. Mirrors
-/// what `layouts/claude-wrap.sh` does on the multiplexer paths so all
-/// three paths boot claude into "say hello + enter listener loop"
-/// identically.
-fn apply_auto_reply_bootstrap(claude_argv: &mut Vec<String>) {
-    if claude_argv.is_empty() {
-        return;
-    }
-    if std::env::var_os("CC_CONNECT_NO_AUTO_REPLY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        return;
-    }
-    let auto_reply_path = match std::env::var_os("CC_CONNECT_AUTO_REPLY_FILE") {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => return,
-    };
-    let bootstrap_path = match std::env::var_os("CC_CONNECT_BOOTSTRAP_FILE") {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => return,
-    };
-    let auto_reply = match std::fs::read_to_string(&auto_reply_path) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let bootstrap = match std::fs::read_to_string(&bootstrap_path) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    // claude_argv[0] is the bin. Insert the system-prompt flag
-    // immediately after it, before any user-supplied trailing args, so
-    // those user args still apply. Append the bootstrap as the last
-    // positional — claude treats it as the initial user prompt.
-    claude_argv.insert(1, "--append-system-prompt".into());
-    claude_argv.insert(2, auto_reply);
-    claude_argv.push(bootstrap);
 }

@@ -24,14 +24,14 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use crate::launcher_paths::{
+    prepare_auto_reply_prompt, prepare_bootstrap_prompt, prepare_claude_wrapper,
+};
 use crate::ticket_payload::TicketPayload;
 use cc_connect_core::ticket::decode_room_code;
 
 const ZELLIJ_LAYOUT: &str = include_str!("../../../layouts/cc-connect.kdl");
 const TMUX_LAUNCHER: &str = include_str!("../../../layouts/cc-connect.tmux.sh");
-const CLAUDE_WRAPPER_SH: &str = include_str!("../../../layouts/claude-wrap.sh");
-const AUTO_REPLY_PROMPT: &str = include_str!("../../../layouts/auto-reply-prompt.md");
-const BOOTSTRAP_PROMPT: &str = include_str!("../../../layouts/bootstrap-prompt.md");
 
 #[derive(Debug, Clone, Copy)]
 enum Multiplexer {
@@ -420,92 +420,20 @@ fn print_exit_hint() {
     eprintln!("  • `cc-connect uninstall` reverses install.sh entirely.");
 }
 
-/// Per-UID temp directory used for ephemeral, machine-local state shared
-/// between the cc-connect launcher, the claude wrapper script, and the
-/// chat-ui pane. Mirrors the `/tmp/cc-connect-$UID/` convention used by
-/// `chat_session::pid_file_path` for active-rooms PID files.
-fn cc_connect_tmp_dir() -> PathBuf {
-    let uid = rustix::process::geteuid().as_raw();
-    std::env::temp_dir().join(format!("cc-connect-{uid}"))
-}
-
-/// Write `claude-wrap.sh` into `/tmp/cc-connect-$UID/`, chmod 0700,
-/// idempotent on every call. The wrapper is the actual binary spawned by
-/// the multiplexer; it picks up `--append-system-prompt` from the
-/// auto-reply file if one is present, else exec's plain claude.
-fn prepare_claude_wrapper() -> Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = cc_connect_tmp_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("create_dir_all {}", dir.display()))?;
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    let path = dir.join("claude-wrap.sh");
-    std::fs::write(&path, CLAUDE_WRAPPER_SH)
-        .with_context(|| format!("write {}", path.display()))?;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
-    Ok(path)
-}
-
-/// Write the auto-reply system-prompt directive into
-/// `/tmp/cc-connect-$UID/auto-reply.md` and return the path. Returns
-/// `Ok(None)` if the user has opted out via `CC_CONNECT_NO_AUTO_REPLY=1`
-/// — the wrapper script then falls through to plain claude.
-fn prepare_auto_reply_prompt() -> Result<Option<PathBuf>> {
-    write_optional_prompt("auto-reply.md", AUTO_REPLY_PROMPT)
-}
-
-/// Write the bootstrap user-prompt (the "say hello + enter listener
-/// loop" first turn handed to claude as argv) into
-/// `/tmp/cc-connect-$UID/bootstrap.md`. Same opt-out via
-/// `CC_CONNECT_NO_AUTO_REPLY=1` as the auto-reply prompt.
-fn prepare_bootstrap_prompt() -> Result<Option<PathBuf>> {
-    write_optional_prompt("bootstrap.md", BOOTSTRAP_PROMPT)
-}
-
-/// Backing implementation of `prepare_auto_reply_prompt` /
-/// `prepare_bootstrap_prompt`: writes `content` to
-/// `/tmp/cc-connect-$UID/<filename>` (mode 0600 in a 0700 dir), or
-/// returns `Ok(None)` when the user opted out via
-/// `CC_CONNECT_NO_AUTO_REPLY`.
-fn write_optional_prompt(filename: &str, content: &str) -> Result<Option<PathBuf>> {
-    if std::env::var_os("CC_CONNECT_NO_AUTO_REPLY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        return Ok(None);
-    }
-    use std::os::unix::fs::PermissionsExt;
-    let dir = cc_connect_tmp_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("create_dir_all {}", dir.display()))?;
-    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    let path = dir.join(filename);
-    std::fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    Ok(Some(path))
-}
-
 fn exec_tui_fallback(
     ticket: &str,
     relay: Option<&str>,
     claude_args: &[String],
-    hosting: bool,
+    _hosting: bool,
 ) -> Result<()> {
     let tui = locate_tui_bin()?;
-    // Write the auto-reply + bootstrap prompts to the per-UID tmpdir
-    // and pass their absolute paths via env. cc-connect-tui reads these
-    // env vars and threads them into the claude PTY's argv. Same opt-out
-    // (`CC_CONNECT_NO_AUTO_REPLY=1`) as the multiplexer paths.
-    let auto_reply_path = prepare_auto_reply_prompt()?;
-    let bootstrap_path = prepare_bootstrap_prompt()?;
+    // The TUI itself calls `cc_connect::launcher_paths::prepare_*` from
+    // its `enter_tui` so the wrapper + prompt files are staged before
+    // the claude PTY spawns. We don't need to seed env vars here.
 
     print_exit_hint();
 
     let mut cmd = Command::new(&tui);
-    if hosting {
-        // `cc-connect-tui start` starts its own host-bg internally — but
-        // we already started one in run_start. To avoid spawning two
-        // host-bgs for the same room, we always go through `join` with
-        // the ticket we already have.
-    }
     cmd.arg("join").arg(ticket);
     if let Some(r) = relay {
         cmd.arg("--relay").arg(r);
@@ -513,12 +441,6 @@ fn exec_tui_fallback(
     if !claude_args.is_empty() {
         cmd.arg("--");
         cmd.args(claude_args);
-    }
-    if let Some(p) = auto_reply_path {
-        cmd.env("CC_CONNECT_AUTO_REPLY_FILE", p);
-    }
-    if let Some(p) = bootstrap_path {
-        cmd.env("CC_CONNECT_BOOTSTRAP_FILE", p);
     }
     let err = cmd.exec();
     Err(anyhow!("exec {} failed: {err}", tui.display()))
