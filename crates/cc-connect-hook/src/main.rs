@@ -90,6 +90,16 @@ fn run() -> Result<()> {
     let self_pubkey = read_self_pubkey();
     let room_summaries = read_room_summaries(&rooms_base, rooms.keys());
     let room_file_indexes = read_room_file_indexes(&rooms_base, rooms.keys());
+    // Build the per-prompt orientation header up front so its byte length
+    // can be charged against the 8 KiB cap inside `render`. ADR-0004 /
+    // PROTOCOL §7.3 step 6 cap covers ALL bytes the hook ultimately
+    // writes to stdout — header included. Computing the header before
+    // render means the chat-block fit loop accounts for it.
+    let has_for_you = rooms
+        .values()
+        .flatten()
+        .any(|m| hook_format::is_owner_directive(m, self_pubkey.as_deref(), self_nick.as_deref()));
+    let header = build_orientation_header(&topic_ids, self_nick.as_deref(), has_for_you);
     let body = hook_format::render(&hook_format::HookInput {
         rooms: &rooms,
         nicknames: &nicknames,
@@ -98,20 +108,13 @@ fn run() -> Result<()> {
         room_summaries: &room_summaries,
         room_file_indexes: &room_file_indexes,
         self_pubkey: self_pubkey.as_deref(),
+        external_prefix_bytes: header.len(),
     });
-    // Prepend a per-prompt orientation header. Tells Claude exactly which
-    // cc-connect room it's bound to + what MCP tools it has + what nick
-    // peers see it as. Without this Claude is blind to its own
-    // membership and asks "which room?" on every prompt.
     // Empty body = no unread chat. Stay silent (no header either) so the
     // hook doesn't spam Claude on every prompt when the room is quiet.
     let output = if body.is_empty() {
         String::new()
     } else {
-        let has_for_you = rooms.values().flatten().any(|m| {
-            hook_format::is_owner_directive(m, self_pubkey.as_deref(), self_nick.as_deref())
-        });
-        let header = build_orientation_header(&topic_ids, self_nick.as_deref(), has_for_you);
         format!("{header}{body}")
     };
 
@@ -285,14 +288,31 @@ fn log_path_for(topic_id: &str) -> PathBuf {
 
 /// Read `~/.cc-connect/nicknames.json` if it exists. Best-effort: any
 /// error returns an empty map (the hook_format will fall back to pubkey
-/// prefixes).
+/// prefixes). Parse failures are logged to `~/.cc-connect/hook.log` so
+/// a malformed file isn't silently swallowed for weeks — callers
+/// debugging "why isn't my nickname showing up" can see the cause
+/// without recompiling the hook.
 fn read_nicknames() -> HashMap<String, String> {
     let path = home_dir().join(".cc-connect").join("nicknames.json");
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return HashMap::new(),
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    match serde_json::from_str::<HashMap<String, String>>(&raw) {
+        Ok(map) => map,
+        Err(e) => {
+            let log = home_dir().join(".cc-connect").join("hook.log");
+            let _ = append_log(
+                &log,
+                &format!(
+                    "[{}] nicknames.json parse error at {}: {e}\n",
+                    iso_now(),
+                    path.display()
+                ),
+            );
+            HashMap::new()
+        }
+    }
 }
 
 /// Per-prompt orientation block. Tells Claude what room it's in, what
@@ -407,9 +427,14 @@ fn append_log(path: &Path, msg: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // PROTOCOL §7.4: hook.log MUST be mode 0600. We pass `.mode(0o600)` so
+    // the file is created with the right permissions atomically (no
+    // umask-race window between create and a follow-up chmod).
+    use std::os::unix::fs::OpenOptionsExt;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(path)?;
     f.write_all(msg.as_bytes())
 }

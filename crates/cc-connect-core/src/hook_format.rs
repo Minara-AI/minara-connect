@@ -57,6 +57,13 @@ pub struct HookInput<'a> {
     /// Last N entries are injected so Claude knows what files exist and
     /// where to find them on disk.
     pub room_file_indexes: &'a HashMap<String, String>,
+    /// Bytes the caller will prepend to the rendered output OUTSIDE this
+    /// function — typically the orientation header that `cc-connect-hook`
+    /// writes ahead of the chat block. Render subtracts this length from
+    /// the 8 KiB chat budget so the *concatenated* stdout stays within
+    /// PROTOCOL.md §7.3 step 6 / ADR-0004's hard cap. Defaults to 0 when
+    /// the caller has no external prefix.
+    pub external_prefix_bytes: usize,
 }
 
 /// Render the Hook's stdout payload. Always returns a complete (possibly
@@ -146,7 +153,13 @@ pub fn render(input: &HookInput) -> String {
         }
     }
 
-    let chat_budget = HOOK_OUTPUT_BUDGET.saturating_sub(preamble.len());
+    // §7.3 step 6 / ADR-0004 hard cap accounts for *all* bytes the hook
+    // ultimately writes to stdout — including any orientation header the
+    // caller will prepend (`external_prefix_bytes`). If we ignore that
+    // length here the concatenated output silently exceeds 8 KiB and
+    // tips into Claude Code's persisted-output fallback path.
+    let chat_budget =
+        HOOK_OUTPUT_BUDGET.saturating_sub(preamble.len() + input.external_prefix_bytes);
     let chat_block = fit_to_budget(lines, chat_budget);
     format!("{preamble}{chat_block}")
 }
@@ -407,8 +420,12 @@ fn sanitize_body(s: &str) -> String {
         .bytes()
         .map(|b| if b < 0x20 || b == 0x7F { b' ' } else { b })
         .collect();
-    // Safe: replacements are ASCII space, which never breaks UTF-8 boundaries.
-    String::from_utf8(bytes).expect("UTF-8 invariant preserved by ASCII-only substitution")
+    // The substitution only ever swaps a single ASCII byte (space or
+    // identity), so the byte stream remains valid UTF-8 by construction.
+    // CLAUDE.md hard rule: no expect/unwrap on hook code paths — fall back
+    // to a marker line if the invariant is ever violated by a future
+    // refactor instead of panicking the hook.
+    String::from_utf8(bytes).unwrap_or_else(|_| String::from("[chatroom] (sanitize fault)"))
 }
 
 /// PROTOCOL §7.3 step 5: `(ts / 60000) % 1440` → zero-padded 24-hour `HH:MM`.
@@ -497,6 +514,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         assert_eq!(out, "");
     }
@@ -513,6 +531,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         assert_eq!(out, "");
     }
@@ -536,6 +555,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         assert_eq!(out, "[chatroom @alice 00:00Z] hi\n");
     }
@@ -553,6 +573,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         assert_eq!(out, "[chatroom @hnvcppgo 00:00Z] x\n");
     }
@@ -571,6 +592,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         // \n→?, \t→?, é (2 bytes 0xc3 0xa9) → 2× '?' per byte-for-byte rule.
         assert!(out.contains("@al?ice???"), "got: {out}");
@@ -590,6 +612,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         assert!(
             out.contains("a b c é d"),
@@ -605,7 +628,9 @@ mod tests {
         //   total_min = 1714323456789 / 60000 = 28572057
         //   day_min   = 28572057 % 1440       = 1017
         //   hh = 16, mm = 57  → "16:57"
-        // (PROTOCOL.md §11.2 originally claimed 08:57 — wrong; this test is the truth.)
+        // (PROTOCOL §11.2 only pins the canonical JSON encoding; the
+        // matching HH:MM formatting is verified separately by §11.4's
+        // hook-output vector. Both vectors must use the same formula.)
         assert_eq!(format_utc_hhmm(1714323456789), "16:57");
         // Negative ts (pre-epoch) handled via div_euclid/rem_euclid.
         assert_eq!(format_utc_hhmm(-60_000).len(), 5);
@@ -631,6 +656,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         let expected = "[chatroom aaaaaa @alice 00:00Z] from A\n\
              [chatroom bbbbbb @bob 00:00Z] from B\n";
@@ -660,6 +686,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);
@@ -688,6 +715,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
 
         assert!(
@@ -707,6 +735,43 @@ mod tests {
         assert!(
             out.contains(&format!("01HZA{:021}", 199)) || out.contains("xxxx"),
             "newest message should be present in the body or its content"
+        );
+    }
+
+    /// Regression: an external prefix the caller will prepend (the
+    /// orientation header in `cc-connect-hook`) must be counted toward
+    /// the 8 KiB cap. Without this, header + chat block silently exceed
+    /// PROTOCOL §7.3 step 6 and tip into Claude's persisted-output
+    /// fallback path.
+    #[test]
+    fn external_prefix_shrinks_chat_budget() {
+        let nm = nicks(&[(A_PUBKEY, "alice")]);
+        // Build enough lines that they would exactly fill the 8 KiB
+        // budget without the prefix; with a 2 KiB prefix charge, render()
+        // must drop messages or marker-prefix to stay ≤ 6 KiB chat.
+        let body = "x".repeat(100); // ~140 byte lines after envelope.
+        let mut msgs = Vec::new();
+        for i in 0..200 {
+            let id = format!("01HZA{:021}", i);
+            msgs.push(make(&id, A_PUBKEY, 0, &body));
+        }
+        let rooms = one_room("aabb11", msgs);
+        let out = render(&HookInput {
+            rooms: &rooms,
+            nicknames: &nm,
+            rooms_base: std::path::Path::new("/tmp/cc-connect-test-rooms"),
+            self_nick: None,
+            room_summaries: empty_map(),
+            room_file_indexes: empty_map(),
+            self_pubkey: None,
+            external_prefix_bytes: 2048, // pretend caller will prepend 2 KiB.
+        });
+        // Concatenated cap: render output + the 2 KiB the caller adds.
+        assert!(
+            out.len() + 2048 <= HOOK_OUTPUT_BUDGET,
+            "render + external prefix must fit in {} (got render={}, external=2048)",
+            HOOK_OUTPUT_BUDGET,
+            out.len()
         );
     }
 
@@ -739,6 +804,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         assert!(!out.starts_with("[chatroom] ("));
     }
@@ -756,6 +822,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         assert_eq!(out, "[chatroom @alice 00:00Z] \n");
     }
@@ -785,6 +852,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None,
+            external_prefix_bytes: 0,
         });
         let expected_path = format!(
             "/var/tmp/cc-test/rooms/{topic}/files/{}-design.svg",
@@ -875,6 +943,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: None, // legacy: no owner gating
+            external_prefix_bytes: 0,
         });
         assert!(
             out.starts_with("[chatroom for-you @alice 00:00Z]"),
@@ -899,6 +968,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: Some(B_PUBKEY),
+            external_prefix_bytes: 0,
         });
         assert!(
             !out.contains("for-you"),
@@ -927,6 +997,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: Some(B_PUBKEY),
+            external_prefix_bytes: 0,
         });
         assert!(
             out.contains("for-you"),
@@ -951,6 +1022,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: Some(B_PUBKEY),
+            external_prefix_bytes: 0,
         });
         assert!(
             !out.contains("for-you"),
@@ -973,6 +1045,7 @@ mod tests {
             room_summaries: empty_map(),
             room_file_indexes: empty_map(),
             self_pubkey: Some(B_PUBKEY),
+            external_prefix_bytes: 0,
         });
         assert!(
             !out.contains("for-you"),
