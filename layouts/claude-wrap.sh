@@ -37,6 +37,15 @@ PROMPT_FILE="${CC_CONNECT_AUTO_REPLY_FILE:-${TMPDIR:-/tmp}/cc-connect-$(id -u)/a
 BOOTSTRAP_FILE="${CC_CONNECT_BOOTSTRAP_FILE:-${TMPDIR:-/tmp}/cc-connect-$(id -u)/bootstrap.md}"
 CLAUDE="${CC_CONNECT_CLAUDE_BIN:-claude}"
 
+# Default permission-mode flag. cc-connect launches claude inside a
+# trusted-substrate room where each prompt fires the UserPromptSubmit
+# hook + MCP tools — interactive permission prompts break that flow.
+# Opt out by exporting CC_CONNECT_NO_PERMISSION_BYPASS=1 (the bypass
+# is then dropped and claude reverts to its built-in default).
+if [ -z "${CC_CONNECT_NO_PERMISSION_BYPASS:-}" ]; then
+  set -- --permission-mode bypassPermissions "$@"
+fi
+
 # When both files exist (room.rs writes them at launch unless
 # CC_CONNECT_NO_AUTO_REPLY=1), claude boots with:
 #   - the auto-reply directive appended to its system prompt
