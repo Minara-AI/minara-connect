@@ -103,8 +103,11 @@ A Message is a JSON object. The reference shape:
 | `id` | string | MUST | 26-character Crockford base32 ULID |
 | `author` | string | MUST | Pubkey string form (see §2) |
 | `ts` | integer | MUST | Unix milliseconds (UTC); informational only — see ordering rules below |
-| `body` | string | MUST | UTF-8, max 8 KiB (8192 bytes after UTF-8 encoding, no Unicode normalisation imposed); senders **MUST** reject longer bodies, recipients **MUST** drop Messages whose `body` exceeds the cap |
-| `kind` | string | MAY (default `"chat"`) | Reserved namespace; v0.1 senders **MUST NOT** emit values other than `"chat"`; v0.1 receivers **MUST** drop Messages with any other `kind` value (and **SHOULD** log the drop for diagnostics). Absence of `kind` is equivalent to `"chat"`. |
+| `body` | string | MUST | UTF-8, max 8 KiB (8192 bytes after UTF-8 encoding, no Unicode normalisation imposed); senders **MUST** reject longer bodies, recipients **MUST** drop Messages whose `body` exceeds the cap. For `kind=file_drop` this field carries the original filename (no path components) — see §4.1. |
+| `kind` | string | MAY (default `"chat"`) | Reserved namespace. v0.2-alpha senders **MAY** emit `"chat"` (default) or `"file_drop"` (see §4.1). Receivers **MUST** drop Messages with any other `kind` value (and **SHOULD** log the drop for diagnostics). Absence of `kind` is equivalent to `"chat"`. |
+| `nick` | string \| null | MAY (v0.2+) | Sender's self-declared display name. UTF-8, ≤ 64 bytes, **MUST NOT** contain control characters. Receivers SHOULD prefer this over local `nicknames.json` for rendering. v0.1 receivers ignore unknown fields per the forward-compat rule. Omit (or `null`) when no nick is set. |
+| `blob_hash` | string \| null | MUST when `kind=file_drop` | 64-character lowercase hex BLAKE3 hash of the announced blob (matches iroh-blobs `Hash::to_string()`). Absent / `null` for `kind=chat`; presence on a chat Message **MUST** be ignored. |
+| `blob_size` | integer \| null | MUST when `kind=file_drop` | Advertised file size in bytes. Receivers **MUST** refuse downloads whose `blob_size` exceeds `FILE_DROP_MAX_BYTES` (1 GiB = 1 << 30 bytes; see §4.1). Absent / `null` for `kind=chat`. |
 
 Implementations **MUST** ignore unknown top-level fields rather than rejecting the Message (forward-compat).
 
@@ -136,6 +139,27 @@ This is a deliberate v0.1 simplification; document the threat model accordingly.
 - Implementations **SHOULD** rely on system NTP. Implementations **MAY** warn at startup if `cc-connect doctor` detects clock skew >5 minutes against an NTP probe.
 - v0.2 will introduce a hybrid logical clock to bound this failure mode.
 
+### 4.1 file_drop kind (v0.2-alpha)
+
+A `file_drop` Message announces a content-addressed blob the sender has put on disk; the bytes flow out-of-band over the iroh-blobs ALPN against the sender's NodeId. The Message is the announcement only.
+
+| Field | Source | Constraint |
+|---|---|---|
+| `kind` | sender | MUST be the literal string `"file_drop"`. |
+| `body` | sender | The original filename. **MUST NOT** contain `/`, `\`, or NUL. **MUST NOT** be empty. Receivers **MUST** revalidate on the wire and drop the Message on violation (path traversal). |
+| `blob_hash` | iroh-blobs `add_path` | 64-char lowercase hex BLAKE3 digest. |
+| `blob_size` | sender's `stat()` | ≤ `FILE_DROP_MAX_BYTES` (1 GiB). Receivers **MUST** refuse to fetch when the responder's advertised size exceeds this. |
+
+**Receiver behaviour on a `file_drop` arrival** (gossip or Backfill):
+1. Validate `body` (filename rules), `blob_hash` (length + lowercase hex), `blob_size` (cap). Drop the Message on any failure.
+2. Dial `author`'s NodeId over `iroh-blobs::ALPN`. Fetch by `Hash`. iroh-blobs verifies BLAKE3 on download.
+3. Export the blob to `~/.cc-connect/rooms/<topic>/files/<id>-<filename>` with mode `0600`. Idempotent — skip the download if the destination already exists.
+4. The Hook (§7) renders the Message as `[chatroom @<nick> HH:MMZ] dropped <filename> @file:<absolute-path>`.
+
+**Sender path discipline (`cc_drop` MCP tool, `/drop` REPL):** implementations **MUST** apply the v0.2-alpha sensitive-path blocklist before adding a file to the iroh-blobs store (refuses anything under `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `.git/`, plus filename patterns `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`, `.env*`, `.netrc`, `.npmrc`, `.pypirc`, and suffixes `.pem`, `.key`, `.p12`, `.pfx`, `.kdbx`). The user **MAY** opt out per-process by setting `CC_CONNECT_DROP_ALLOW_DANGEROUS=1`. See SECURITY.md for the threat model.
+
+`file_drop` was reserved as v0.2+ in earlier drafts of this document; the reference implementation has shipped it since v0.4.x and the protocol promotes the kind to v0.2-alpha. Implementations targeting strict v0.1 compatibility **MUST** still drop unrecognised kinds — they will simply not see file_drops from peers, which is the correct behaviour.
+
 ---
 
 ## 5. Chat log
@@ -162,7 +186,7 @@ If two Messages with the same `id` but different content arrive, implementations
 
 **Corruption tolerance:** When reading the log, implementations **SHOULD** skip and warn on any line that fails to parse, continue with the next, and never abort.
 
-**Concurrent-writer atomicity:** A Peer may write to log.jsonl from two paths concurrently — the chat REPL appending the local user's outgoing Message, and the gossip listener appending an incoming Message. Both writers **MUST** serialise via an `flock(LOCK_EX)` on the log file (acquired before write, released after fsync). POSIX `O_APPEND` write atomicity is only guaranteed up to `PIPE_BUF` (typically 4096 bytes) — Messages near the 8 KiB cap can interleave without the lock. The same lock is held by `cc-connect-hook` readers in §7.3; readers acquire `LOCK_SH` to permit concurrent reads but block writers.
+**Concurrent-writer atomicity:** A Peer may write to log.jsonl from two paths concurrently — the chat REPL appending the local user's outgoing Message, and the gossip listener appending an incoming Message. Both writers **MUST** serialise via an exclusive advisory lock on the log file (acquired before write, released after fsync). The lock discipline is unified with §7.4: `fcntl(F_SETLK)` byte-range locking (Linux: `F_OFD_SETLK` per-fd preferred). `flock(2)` is **NOT** permitted because §7.4 forbids it for cursor + log files (NFS-safe + cross-fd consistency). POSIX `O_APPEND` write atomicity is only guaranteed up to `PIPE_BUF` (typically 4096 bytes) — Messages near the 8 KiB cap can interleave without the lock. Readers in §7.3 acquire the same family of lock in shared mode (`F_RDLCK`).
 
 The parent directory `~/.cc-connect/rooms/<topic_id_hex>/` **MUST** be created with mode `0700` if missing.
 
@@ -277,11 +301,13 @@ If the Hook cannot parse stdin or `session_id` is missing, it **MUST** write a o
 
 In order:
 
+0. **Cross-process isolation gate.** Read the `CC_CONNECT_ROOM` environment variable. If unset or empty, the Hook **MUST** emit nothing on stdout and exit `0`. The chat-session host (cc-connect-tui / cc-connect / cc-connect-host-bg) sets `CC_CONNECT_ROOM=<topic_id_hex>` in the environment of every Claude Code child it spawns; an unrelated `claude` invocation on the same machine therefore sees no chat injection. Without this gate one user's chat substrate would bleed into every Claude Code session on the box (CLAUDE.md "trust boundary"). After step 1 enumerates `*.active` files, implementations **MUST** filter the list down to entries matching the `CC_CONNECT_ROOM` value before proceeding to step 3 — i.e. inject from at most one Room per Hook fire, the one Claude was bound to.
 1. Determine `$UID` and `$TMPDIR` (defaulting `TMPDIR` to `/tmp`). Construct the active-rooms directory: `${TMPDIR}/cc-connect-${UID}/active-rooms/`.
 2. List `*.active` files in that directory. For each:
    - Read the file contents (one line, integer PID).
    - Call `kill(pid, 0)`. If the call fails with `ESRCH` (no such process), unlink the file and skip this room.
    - Otherwise treat the room as active; the filename's stem (without `.active`) is the topic_id_hex.
+   - **MUST** drop entries whose topic_id_hex does not equal `CC_CONNECT_ROOM` (step 0).
 3. For each active Room, in any order:
    - Open the cursor file at `~/.cc-connect/cursors/<topic_id_hex>/<session_id>.cursor`. Create parent dirs with mode `0700` if needed. Open with `O_RDWR | O_CREAT`, mode `0600`.
    - Acquire `flock(LOCK_EX)` on the file descriptor. Hold until step 8.
@@ -293,12 +319,13 @@ In order:
    - `<nick>` is the value mapped from the Message's `author` Pubkey by `~/.cc-connect/nicknames.json` (a flat `pubkey → nickname` JSON object), falling back to the first 8 characters of the Pubkey. Nicknames containing `\n`, `\r`, `\t`, or characters outside the printable ASCII range `0x20–0x7E` **MUST** be replaced byte-for-byte with `?`.
    - `<hh:mm>Z` is the **UTC** hour:minute derived from `ts` (zero-padded, 24-hour, trailing `Z` to mark UTC). Local-time rendering is reserved for the chat REPL display, not the Hook output.
    - `<body>` is the Message body with all bytes in the C0 control range (`0x00–0x1F`) plus `0x7F` (DEL) replaced by single ASCII spaces for single-line emission. UTF-8 multi-byte sequences are preserved.
-6. If the cumulative formatted output across **all** Rooms would exceed 8 KiB (8192 bytes after UTF-8 encoding, including all newlines and any prepended marker line):
-   - Drop the **oldest** Messages (by `id`, across the merged-and-sorted multi-Room set) until the remaining set plus the marker line fits.
+6. If the cumulative formatted output across **all** Rooms would exceed 8 KiB (8192 bytes after UTF-8 encoding, **including** all newlines, any prepended marker line, and any orientation header / preamble the implementation writes ahead of the chat block — see step 6b):
+   - Drop the **oldest** Messages (by `id`, across the merged-and-sorted multi-Room set) until the remaining set plus the marker line plus the header fits.
    - Prepend a single line: `[chatroom] (N older messages skipped to fit)\n` where `N` is the count actually dropped.
    - The fit check is iterative — adding the marker line itself can change the budget; implementations **MUST** loop until the final size is ≤ 8 KiB.
    - The 8 KiB cap is hard. Rationale: ADR-0004.
-7. Write the assembled output to stdout in chronological order across all active Rooms — interleaved by Message `id` ascending. Each output line carries its `<room-tag>` (multi-room case) so Claude can distinguish.
+6b. **Optional orientation header.** Implementations **MAY** prepend a fixed multi-line preamble before the chat lines that orients Claude to the active Room, the MCP tools available, the trust boundary that chat lines are untrusted-content, and any owner-driven `for-you` priority directive. The reference implementation does so by default. The preamble bytes **MUST** be charged against the 8 KiB cap in step 6 — i.e. the chat-block fit loop subtracts the preamble length from its budget before starting. A second implementer is free to omit the preamble; the chat-line block format in step 5 is the protocol-mandated minimum.
+7. Write the assembled output to stdout in chronological order across all active Rooms — interleaved by Message `id` ascending. Each output line carries its `<room-tag>` (multi-room case) so Claude can distinguish. The optional preamble from step 6b is emitted before any chat lines.
 8. For each cursor file held: write the highest considered Message `id` (including any dropped in step 6) to a sibling `.tmp` file, fsync the `.tmp` file, then `rename(2)` over the cursor file, then fsync the parent directory. Release the flock.
 
    **flock-vs-rename race note:** an `flock` is held against the open file descriptor's inode, not against the path. After step 8's `rename(2)` replaces the path with a new inode, any other Hook invocation that opened the path **before** the rename still holds a lock on the *old* inode and is invisible to subsequent invocations. To avoid lost cursor advances, implementations **MUST** use the following discipline: (a) open with `O_RDWR | O_CREAT`; (b) acquire `flock(LOCK_EX)`; (c) **after** acquiring the lock, `stat` the path and the held fd's inode (`fstat`); if they differ, close, re-open, and retry the lock acquisition (bounded loop, e.g. 5 attempts before bailing); (d) only then read/modify/rename. This guarantees the rename winner's `LOCK_EX` is the one that actually serializes the next reader.
@@ -366,7 +393,7 @@ Updates **MUST** be atomic: write the new value to a sibling `.cursor.tmp` file,
 
 The following names are reserved and **MUST NOT** be used by v0.1 implementations except as specified:
 
-- **Message kinds:** `chat` (default in v0.1), `file_drop` (v0.2+), `system` (v0.2+).
+- **Message kinds:** `chat` (default), `file_drop` (v0.2-alpha — see §4.1), `system` (reserved, v0.3+).
 - **URI scheme:** `cc://` is reserved for MCP resource URIs in v0.2+. v0.1 implementations **MUST NOT** register handlers or expose resources under this scheme. Message bodies **MAY** contain `cc://` strings as data; the reservation applies only to URI handler registration and resource publication.
 - **ALPN strings:** any ALPN beginning with `cc-connect/` is reserved for the cc-connect protocol family. v0.1 uses `cc-connect/v1/backfill`. Future ALPNs (e.g. `cc-connect/v1/file-drop`) follow the same naming.
 - **Filesystem paths:** `~/.cc-connect/`, `${TMPDIR}/cc-connect-${UID}/`, `~/.claude/settings.json`'s `hooks.UserPromptSubmit` array.
@@ -411,6 +438,8 @@ body    = use postgres                    (12 bytes UTF-8, no escapes needed)
 ```
 
 Length: 146 bytes (verified by `cc-connect-core::message::tests::protocol_11_2_canonical_encoding_byte_exact`). Field order **MUST** match the canonical form exactly when emitting. Decoders **MUST NOT** require this ordering on input.
+
+**Note:** This vector pins the on-the-wire JSON form **only**. The Hook's `[chatroom @<nick> HH:MMZ]` rendering for the same `ts` value is `(1714323456789 / 60000) % 1440 = 1017 → 16:57Z`, but that's a separate concern verified by §11.4's hook-output vector. Earlier drafts of this section misquoted the rendered time — the formula in §7.3 step 5 is the authority; the rendered Hook output for *this* specific timestamp would be `16:57Z`, not the `23:07Z` shown in §11.4 (which uses a different timestamp).
 
 **Edge-case body vector:** with `body = "<é>\n\"x"` (literal: `<`, `é` as 0xc3 0xa9, `>`, raw newline 0x0a, `"`, `x` — 7 input bytes UTF-8), the canonical encoding of the `body` JSON string value (just the `"…"` field value, not including `"body":`) is:
 ```
