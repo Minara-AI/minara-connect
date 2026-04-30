@@ -82,6 +82,7 @@ impl ProtocolHandler for BackfillHandler {
         async move {
             let result = handle_one(&log_path, connection).await;
             if let Err(e) = result {
+                crate::gossip_debug::log("backfill server", &format!("handle_one err: {e:#}"));
                 eprintln!("[backfill] server: {e:#}");
             }
             Ok(())
@@ -90,13 +91,29 @@ impl ProtocolHandler for BackfillHandler {
 }
 
 async fn handle_one(log_path: &Path, connection: Connection) -> Result<()> {
+    crate::gossip_debug::log(
+        "backfill server",
+        &format!("accept log={}", log_path.display()),
+    );
     let (mut send, mut recv) = connection.accept_bi().await.context("accept_bi")?;
+    crate::gossip_debug::log("backfill server", "accept_bi ok");
 
     // Read length-prefixed request.
     let body = read_length_prefixed(&mut recv)
         .await
         .context("read request")?;
+    crate::gossip_debug::log(
+        "backfill server",
+        &format!("read request body bytes={}", body.len()),
+    );
     let request: BackfillRequest = serde_json::from_slice(&body).context("parse request")?;
+    crate::gossip_debug::log(
+        "backfill server",
+        &format!(
+            "parsed request v={} since={:?} limit={}",
+            request.v, request.since, request.limit
+        ),
+    );
 
     if request.v != PROTO_V {
         return Err(anyhow!("VERSION_MISMATCH: request v={}", request.v));
@@ -106,21 +123,40 @@ async fn handle_one(log_path: &Path, connection: Connection) -> Result<()> {
     // Read the log and produce the response set: messages with `id > since`,
     // ordered ascending, capped at `limit`.
     let mut log_file = log_io::open_or_create_log(log_path).context("open log")?;
+    crate::gossip_debug::log("backfill server", "log opened");
     let all = log_io::read_since(&mut log_file, request.since.as_deref()).context("read_since")?;
+    crate::gossip_debug::log(
+        "backfill server",
+        &format!("read_since returned {} message(s)", all.len()),
+    );
     // Server returns the FIRST (oldest) `limit` qualifying messages so the
     // joiner sees a contiguous prefix of unread history. PROTOCOL §6.2:
     // "responder MUST return all matching Messages up to limit".
     let messages: Vec<Message> = all.into_iter().take(limit).collect();
+    crate::gossip_debug::log(
+        "backfill server",
+        &format!(
+            "returning {} message(s) after limit={}",
+            messages.len(),
+            limit
+        ),
+    );
 
     let response = BackfillResponse {
         v: PROTO_V,
         messages,
     };
     let resp_bytes = serde_json::to_vec(&response).context("encode response")?;
+    crate::gossip_debug::log(
+        "backfill server",
+        &format!("encoded response bytes={}", resp_bytes.len()),
+    );
     write_length_prefixed(&mut send, &resp_bytes)
         .await
         .context("write response")?;
+    crate::gossip_debug::log("backfill server", "write_length_prefixed ok");
     send.finish().context("finish send stream")?;
+    crate::gossip_debug::log("backfill server", "finish ok");
 
     Ok(())
 }
