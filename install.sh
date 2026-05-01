@@ -76,7 +76,7 @@ if [[ $need_rust -eq 1 ]]; then
     # shellcheck disable=SC1090,SC1091
     [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
   else
-    fail "Rust is required. Install rustc ≥ 1.85 then re-run install.sh."
+    fail "Rust is required. Install rustc ≥ 1.89 then re-run install.sh."
   fi
 fi
 
@@ -88,7 +88,7 @@ ok "rustc ${rust_ver}"
 # ("feature `edition2024` is required"); compare the version up front and
 # offer to `rustup update` so users don't burn 5 minutes building before
 # the failure.
-required_rust="1.85.0"
+required_rust="1.89.0"
 ver_lt() {
   # Returns 0 (true) when $1 < $2 by semver-ish ordering. Uses sort -V.
   local a="$1" b="$2"

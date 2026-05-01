@@ -1,0 +1,5 @@
+# Generated / vendored / agent state — not source we maintain.
+node_modules
+bun.lock
+dist
+.omc

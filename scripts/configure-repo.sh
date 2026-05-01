@@ -135,7 +135,7 @@ protection_payload=$(cat <<'JSON'
       "clippy",
       "test (ubuntu-latest)",
       "test (macos-latest)",
-      "MSRV (1.85)",
+      "MSRV (1.89)",
       "chat-ui (typecheck + test)"
     ]
   },

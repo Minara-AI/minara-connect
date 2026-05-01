@@ -39,7 +39,7 @@ Full architecture: [`PROTOCOL.md`](./PROTOCOL.md). Decision rationale: [`docs/ad
 
 ## Install
 
-You need: macOS or Linux, Rust ≥ 1.85 (or let the installer install it for you), a working Claude Code install.
+You need: macOS or Linux, Rust ≥ 1.89 (or let the installer install it for you), a working Claude Code install.
 
 ### One-liner
 

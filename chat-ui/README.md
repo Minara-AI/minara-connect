@@ -39,11 +39,11 @@ bun run build      # → ../target/release/cc-chat-ui
 
 ## Hotkeys
 
-| Key | Action |
-|---|---|
-| `Ctrl-Q` | quit |
-| `Ctrl-Y` | copy ticket to clipboard |
-| `PgUp` / `PgDn` | scrollback |
+| Key             | Action                                      |
+| --------------- | ------------------------------------------- |
+| `Ctrl-Q`        | quit                                        |
+| `Ctrl-Y`        | copy ticket to clipboard                    |
+| `PgUp` / `PgDn` | scrollback                                  |
 | `Tab` / `Enter` | accept @-mention completion (popup visible) |
-| `Esc` | dismiss completion popup |
-| `Enter` | send (popup hidden) |
+| `Esc`           | dismiss completion popup                    |
+| `Enter`         | send (popup hidden)                         |

@@ -42,7 +42,7 @@ scripts/smoke-test-bg.sh                   # background host-daemon path
 ## Non-obvious gotchas
 
 - **Vendored ed25519 / ed25519-dalek**. `Cargo.toml`'s `[patch.crates-io]` points at `vendored/ed25519` + `vendored/ed25519-dalek`. The published `ed25519-3.0.0-rc.4` is broken against current `pkcs8` (`Error::KeyMalformed` enum-variant break). Drop the patch only when upstream ships a working `ed25519-dalek`. See @TODOS.md.
-- **MSRV is 1.85** (`workspace.package.rust-version`). Bumped from 1.79 because some iroh-stack deps require `edition = "2024"`. CI gates on this; install.sh actively `rustup update`s when the user has an older toolchain.
+- **MSRV is 1.89** (`workspace.package.rust-version`). Driven by the iroh stack itself (`iroh@0.97`, `iroh-blobs@0.99`, `iroh-gossip@0.97`, `iroh-relay@0.97` all require 1.89). CI gates on this; install.sh actively `rustup update`s when the user has an older toolchain.
 - **Hook trust boundary**. `cc-connect-hook` injects chat context only when `CC_CONNECT_ROOM` is set in its env (set by `cc-connect-tui` when it spawns the Claude PTY). Unrelated `claude` invocations on the same machine see nothing. Don't loosen this — it's the cross-process isolation guarantee in @SECURITY.md.
 - **PID-based active-rooms discovery** lives at `/tmp/cc-connect-$UID/active-rooms/<topic>.active`, not under `~`. PIDs are per-machine; cloud-synced homes would collide. See `docs/adr/0003-pid-based-active-rooms-discovery.md`.
 - **8 KB hook stdout budget.** `cc-connect-hook` keeps each `UserPromptSubmit` payload ≤ 8 KB so it stays inline; over that, Claude Code falls back to a 2 KB preview + persisted file. See `docs/adr/0004-hook-budget-and-graceful-overflow.md`.
