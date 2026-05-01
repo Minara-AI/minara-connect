@@ -43,10 +43,10 @@ pub fn render(
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(inner);
 
-    // Own (us + our `<self>-cc` AI) renders `[nick] body` left-aligned;
-    // peer (anything Incoming) renders `body [nick]` right-aligned so
-    // the peer nick anchors against the right edge. System / marker /
-    // warn lines render full-width left-aligned.
+    // chat-ui parity: peer messages render `[nick] body` left-aligned;
+    // own messages render `body [nick]` right-aligned so the nick
+    // anchors against the right edge (user-requested layout). System,
+    // marker, warn lines render full-width left-aligned.
     let mut lines: Vec<Line> = Vec::with_capacity(tab.chat_lines.len() * 2);
     for cl in tab.chat_lines.iter() {
         let is_peer = matches!(
@@ -54,7 +54,7 @@ pub fn render(
             ChatLineKind::Incoming | ChatLineKind::IncomingMention
         );
         let is_own = matches!(cl.kind, ChatLineKind::Echo);
-        let align = if is_peer {
+        let align = if is_own {
             Alignment::Right
         } else {
             Alignment::Left
@@ -63,11 +63,9 @@ pub fn render(
         let main = match cl.kind {
             ChatLineKind::System => Line::from(Span::styled(cl.text.clone(), theme::chat_system())),
             ChatLineKind::Marker => Line::from(Span::styled(cl.text.clone(), theme::chat_marker())),
-            // Peer lines: `body  [nick]` with nick anchored on the right.
-            ChatLineKind::Incoming => render_chat_line(&cl.text, false, true),
-            ChatLineKind::IncomingMention => render_chat_line(&cl.text, true, true),
-            // Own lines (us + our AI): `[nick] body` left-aligned.
-            ChatLineKind::Echo => render_chat_line(&cl.text, false, false),
+            ChatLineKind::Incoming => render_incoming(&cl.text, false, false),
+            ChatLineKind::IncomingMention => render_incoming(&cl.text, true, false),
+            ChatLineKind::Echo => render_incoming(&cl.text, false, true),
             ChatLineKind::Warn => Line::from(Span::styled(cl.text.clone(), theme::chat_warn())),
         };
         lines.push(main.alignment(align));
@@ -200,21 +198,20 @@ fn format_utc_hhmm(ts: i64) -> String {
     format!("{hh:02}:{mm:02}")
 }
 
-/// Render a `[<nick>] <body>` chat line. When `mention` is true the
-/// body uses the mention palette and a leading `(@me)` marker is
-/// styled separately. When `nick_right_anchored` is true the line is
-/// rebuilt as `body  [nick]` so the nick lands on the right edge —
-/// used for peer (incoming) lines that the caller right-aligns. Own
-/// lines pass `false` and render `[nick] body` for left-anchored nick.
-fn render_chat_line(text: &str, mention: bool, nick_right_anchored: bool) -> Line<'static> {
+/// Render a `[<nick>] <body>` chat line. When `mention` is true the body
+/// uses the brighter mention palette and a leading `(@me)` marker is
+/// pulled out and styled separately. When `own` is true (echo of our
+/// own send) the nick is anchored to the **right** of the body so the
+/// user-requested layout reads `body  [nick]` instead of the
+/// peer-style `[nick] body`. Own messages render in the accent palette
+/// (chat-ui parity), peers in the incoming palette.
+fn render_incoming(text: &str, mention: bool, own: bool) -> Line<'static> {
     let (nick_style, body_style) = if mention {
         (theme::chat_mention_nick(), theme::chat_mention_body())
-    } else if nick_right_anchored {
-        // Peer line: incoming blue palette.
-        (theme::chat_incoming_nick(), theme::chat_incoming_body())
-    } else {
-        // Own line: own green palette (chat-ui parity).
+    } else if own {
         (theme::chat_own_nick(), theme::chat_own_body())
+    } else {
+        (theme::chat_incoming_nick(), theme::chat_incoming_body())
     };
     let (mention_marker, rest_text) = if let Some(rest) = text.strip_prefix("(@me) ") {
         ("(@me) ", rest)
@@ -232,14 +229,14 @@ fn render_chat_line(text: &str, mention: bool, nick_right_anchored: bool) -> Lin
                     theme::chat_mention_marker(),
                 ));
             }
-            if nick_right_anchored {
-                // body  [nick]  — peer style, nick anchored right.
+            if own {
+                // body  [nick]  — nick anchored on the right edge.
                 spans.push(Span::styled(body.to_string(), body_style));
                 spans.push(Span::styled("  [".to_string(), nick_style));
                 spans.push(Span::styled(nick.to_string(), nick_style));
                 spans.push(Span::styled("]".to_string(), nick_style));
             } else {
-                // [nick] body — own style, nick anchored left.
+                // [nick] body — peer-style, nick on the left.
                 spans.push(Span::styled("[".to_string(), nick_style));
                 spans.push(Span::styled(nick.to_string(), nick_style));
                 spans.push(Span::styled("] ".to_string(), nick_style));
