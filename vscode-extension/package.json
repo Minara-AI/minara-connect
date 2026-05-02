@@ -16,12 +16,20 @@
   },
   "categories": ["Other"],
   "main": "./out/extension.js",
-  "activationEvents": ["onCommand:cc-connect.hello"],
+  "activationEvents": [
+    "onCommand:cc-connect.hello",
+    "onCommand:cc-connect.openRoom"
+  ],
   "contributes": {
     "commands": [
       {
         "command": "cc-connect.hello",
         "title": "Hello",
+        "category": "cc-connect"
+      },
+      {
+        "command": "cc-connect.openRoom",
+        "title": "Open Room (placeholder)",
         "category": "cc-connect"
       }
     ]
