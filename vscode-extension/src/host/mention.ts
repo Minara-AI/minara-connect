@@ -1,24 +1,25 @@
-// @-mention detection — mirrors the Rust
-// `cc-connect-core::hook_format::mentions_self` semantics: we want
-// `@<self>`, `@<self>-cc`, and broadcast tokens (`cc`, `claude`, `all`,
-// `here`) to all wake the embedded Claude.
+// @-mention detection for "actively spawn a Claude turn".
 //
-// This is a wider match than chat-ui's `bodyMentionsSelf` (which
-// deliberately omits `-cc` for the human-facing `(@me)` highlight). The
-// extension's purpose is to fire `query()` whenever the rust hook would
-// inject a `for-you` directive, so we follow the rust contract.
+// Different from the Rust `cc-connect-core::hook_format::mentions_self`
+// (which fires the `for-you` HOOK directive on bare `@<self>` too).
+// Reason: the hook is *passive context injection* on a Claude turn that
+// is already going to run; this function gates the *active spawn* of a
+// new query. Bare `@<self>` is an address to the HUMAN, not the AI —
+// peers chatting "yo @yjj seen this?" should not auto-summon yjj's
+// Claude. To explicitly address the AI peer, use `@<self>-cc`. To
+// address every AI in the room at once, use a broadcast token.
 
 const BROADCAST_TOKENS = ['cc', 'claude', 'all', 'here'] as const;
 
-/** Returns true iff `body` mentions the local user (any of the
- *  forms above) with word-boundary semantics — `@alice-cc hi` does
- *  NOT register as a mention of `alice`. */
+/** Returns true iff `body` is explicitly addressed to the local AI:
+ *  `@<myNick>-cc` (the AI mirror form) or any broadcast token
+ *  (`@cc` / `@claude` / `@all` / `@here`). Word-boundary semantics —
+ *  `@yjj-ccc hi` does NOT register. Bare `@<myNick>` is intentionally
+ *  NOT matched (that's an address to the human). */
 export function shouldWakeClaude(body: string, myNick: string): boolean {
   if (!myNick || myNick.length === 0) return false;
   const lower = body.toLowerCase();
-  const self = myNick.toLowerCase();
-  if (matchAtToken(lower, self)) return true;
-  if (matchAtToken(lower, `${self}-cc`)) return true;
+  if (matchAtToken(lower, `${myNick.toLowerCase()}-cc`)) return true;
   for (const tok of BROADCAST_TOKENS) {
     if (matchAtToken(lower, tok)) return true;
   }

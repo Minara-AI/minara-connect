@@ -104,17 +104,28 @@ guarantee called out in @SECURITY.md and CLAUDE.md.
 
 ## 3. Pinned decisions
 
-### D1 — Chat → embedded Claude: only `@me` triggers a Session turn
+### D1 — Chat → embedded Claude: explicit AI address triggers a turn
 
 **Rule.** Plain chat is broadcast to peers and rendered in the chat
-panel. Only an `@<my-nick>` mention triggers a new turn on the embedded
-Claude. Self-instruction = type `@me <task>` in your own chat.
+panel. A new turn on the embedded Claude fires only when the message
+body explicitly addresses the AI:
 
-**Why.** Aligns with the existing `cc_wait_for_mention` MCP tool and
-the peer-@-mention wake feature already in the repo. Avoids spamming
-the embedded Claude with peer chatter. Keeps "talk to peers" and
-"command my Claude" visually identical (one chat panel) but
-behaviorally distinct (one trigger word).
+- `@<my-nick>-cc` — the AI mirror form (your own AI, or a peer's AI)
+- `@cc` / `@claude` / `@all` / `@here` — broadcast tokens (every
+  participating AI in the Room)
+
+**Bare `@<my-nick>` does NOT wake the local Claude.** That form
+addresses the *human* — peers chatting "yo @yjj seen this?" should
+not auto-summon yjj's Claude. Self-instruction = type
+`@<my-nick>-cc <task>` in your own chat.
+
+**Why.** Deliberate narrowing from the Rust
+`hook_format::mentions_self` (which DOES match bare `@<self>` for
+its `for-you` directive). Distinction: that hook is *passive context
+injection on an already-running turn*; D1 here gates the *active
+spawn of a fresh `query()`*. Different operations, different rules.
+Avoids auto-summoning the AI on every casual `@yjj` from peers and
+keeps "talk to peers" vs "command my Claude" cleanly separable.
 
 **How.**
 - **Extension-orchestrated, per-turn spawn.** The extension tails
