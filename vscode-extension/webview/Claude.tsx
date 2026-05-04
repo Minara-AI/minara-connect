@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { processClaude, type ClaudeBlock } from './processClaude';
 import { useStickyScroll } from './useStickyScroll';
 
 export interface ClaudeRunnerState {
@@ -12,7 +13,8 @@ interface ClaudeProps {
 }
 
 export function Claude({ events, state }: ClaudeProps): React.ReactElement {
-  const scrollRef = useStickyScroll(events.length);
+  const blocks = React.useMemo(() => processClaude(events), [events]);
+  const scrollRef = useStickyScroll(blocks.length);
   const busyLabel = state.busy
     ? state.queued > 0
       ? `· busy (${state.queued} queued)`
@@ -24,103 +26,129 @@ export function Claude({ events, state }: ClaudeProps): React.ReactElement {
         claude {busyLabel && <span className="pane-busy">{busyLabel}</span>}
       </h2>
       <div className="claude-log" ref={scrollRef}>
-        {events.length === 0 ? (
+        {blocks.length === 0 ? (
           <div className="muted">(idle — @-mention me from chat to start)</div>
         ) : (
-          events.map((e, i) => <ClaudeRow key={i} event={e} />)
+          blocks.map((b, i) => <BlockRow key={i} block={b} />)
         )}
       </div>
     </div>
   );
 }
 
-function ClaudeRow({ event }: { event: unknown }): React.ReactElement | null {
-  const ev = event as {
-    type?: string;
-    subtype?: string;
-    session_id?: string;
-    hook_name?: string;
-    error?: string;
-    num_turns?: number;
-    total_cost_usd?: number;
-    message?: { content?: ContentBlock[] };
-  };
-  const t = ev.type;
-  const sub = ev.subtype;
+function BlockRow({ block }: { block: ClaudeBlock }): React.ReactElement | null {
+  switch (block.kind) {
+    case 'session':
+      return (
+        <div className="claude-row claude-system">
+          ▸ session start ({block.sessionId.slice(0, 8)}…)
+        </div>
+      );
+    case 'hook': {
+      const icon =
+        block.status === 'pending'
+          ? '⏳'
+          : block.status === 'ok'
+            ? '·'
+            : '✗';
+      const cls =
+        block.status === 'fail' ? 'claude-row claude-hook claude-error' : 'claude-row claude-hook';
+      return (
+        <div className={cls}>
+          {icon} {shortenHookName(block.hookName)}
+          {block.status === 'fail' && block.exitCode !== undefined
+            ? ` · exit ${block.exitCode}`
+            : ''}
+        </div>
+      );
+    }
+    case 'text':
+      return <div className="claude-row claude-text">{block.text}</div>;
+    case 'tool':
+      return <ToolCard block={block} />;
+    case 'result': {
+      const cost =
+        typeof block.costUsd === 'number'
+          ? ` · $${block.costUsd.toFixed(3)}`
+          : '';
+      return (
+        <div className="claude-row claude-result">
+          ✓ done ({block.numTurns} turn{block.numTurns === 1 ? '' : 's'}
+          {cost})
+        </div>
+      );
+    }
+    case 'error':
+      return <div className="claude-row claude-error">✗ {block.message}</div>;
+  }
+}
 
-  if (t === 'system' && sub === 'init') {
-    const sid = (ev.session_id ?? '').slice(0, 8);
-    return (
-      <div className="claude-row claude-system">▸ session start ({sid}…)</div>
-    );
-  }
-  if (t === 'system' && (sub === 'hook_started' || sub === 'hook_response')) {
-    return (
-      <div className="claude-row claude-hook">
-        hook · {ev.hook_name ?? '?'} · {sub}
-      </div>
-    );
-  }
-  if (t === 'assistant') {
-    const blocks = ev.message?.content ?? [];
-    return (
-      <React.Fragment>
-        {blocks.map((b, j) => renderBlock(b, j))}
-      </React.Fragment>
-    );
-  }
-  if (t === 'result') {
-    const turns = ev.num_turns ?? 0;
-    const cost =
-      typeof ev.total_cost_usd === 'number'
-        ? ` · $${ev.total_cost_usd.toFixed(3)}`
-        : '';
-    return (
-      <div className="claude-row claude-result">
-        ✓ done ({turns} turn{turns === 1 ? '' : 's'}
-        {cost})
-      </div>
-    );
-  }
-  if (t === 'sdk:error') {
-    return (
-      <div className="claude-row claude-error">✗ {ev.error ?? 'sdk error'}</div>
-    );
-  }
-  // Other event types (user/tool_result/rate_limit_event/etc.) — small.
+function ToolCard({
+  block,
+}: {
+  block: Extract<ClaudeBlock, { kind: 'tool' }>;
+}): React.ReactElement {
+  const cls = block.result?.isError
+    ? 'claude-tool-card claude-tool-error'
+    : 'claude-tool-card';
   return (
-    <div className="claude-row claude-other">
-      [{t}
-      {sub ? `:${sub}` : ''}]
+    <div className={cls}>
+      <div className="claude-tool-head">
+        <span className="claude-tool-name">{shortenToolName(block.name)}</span>
+        <span className="claude-tool-input">{summarizeInput(block.name, block.input)}</span>
+      </div>
+      {block.result && (
+        <div className="claude-tool-result">
+          {block.result.isError ? '✗ ' : '↳ '}
+          {block.result.preview || '(empty)'}
+        </div>
+      )}
     </div>
   );
 }
 
-interface ContentBlock {
-  type?: string;
-  text?: string;
-  name?: string;
-  input?: unknown;
+/** Strip the `mcp__<server>__` prefix off MCP tool names so they
+ *  render as e.g. `cc_at` instead of `mcp__cc-connect__cc_at`. Native
+ *  tools like Read / Edit / Bash pass through unchanged. */
+function shortenToolName(name: string): string {
+  const m = /^mcp__[^_]+(?:[^_]|_[^_])*?__(.+)$/.exec(name);
+  return m ? m[1] : name;
 }
 
-function renderBlock(
-  b: ContentBlock,
-  key: number,
-): React.ReactElement | null {
-  if (b.type === 'text' && typeof b.text === 'string') {
-    return (
-      <div key={key} className="claude-row claude-text">
-        {b.text}
-      </div>
-    );
+/** `PreToolUse:mcp__cc-connect__cc_send` → `PreToolUse · cc_send` */
+function shortenHookName(name: string): string {
+  const colon = name.indexOf(':');
+  if (colon < 0) return name;
+  const phase = name.slice(0, colon);
+  const tool = shortenToolName(name.slice(colon + 1));
+  return `${phase} · ${tool}`;
+}
+
+/** Pick the most useful field from common tools' input shape. */
+function summarizeInput(name: string, input: Record<string, unknown>): string {
+  const short = shortenToolName(name);
+  // Tool-specific best-fit field.
+  const candidates: Record<string, string[]> = {
+    Read: ['file_path', 'path'],
+    Edit: ['file_path', 'path'],
+    Write: ['file_path', 'path'],
+    Bash: ['command'],
+    Grep: ['pattern'],
+    Glob: ['pattern'],
+    cc_send: ['body'],
+    cc_at: ['nick', 'body'],
+    cc_drop: ['path'],
+    cc_recent: ['limit'],
+    cc_save_summary: ['body'],
+    cc_wait_for_mention: ['timeout_seconds'],
+  };
+  const keys = candidates[short] ?? Object.keys(input);
+  const parts: string[] = [];
+  for (const k of keys.slice(0, 2)) {
+    const v = input[k];
+    if (v === undefined) continue;
+    const s = typeof v === 'string' ? v : JSON.stringify(v);
+    parts.push(s.length > 60 ? s.slice(0, 57) + '…' : s);
   }
-  if (b.type === 'tool_use') {
-    const summary = JSON.stringify(b.input ?? {}).slice(0, 80);
-    return (
-      <div key={key} className="claude-row claude-tool">
-        ▸ {b.name ?? 'tool'}({summary})
-      </div>
-    );
-  }
-  return null;
+  return parts.join(' · ');
 }

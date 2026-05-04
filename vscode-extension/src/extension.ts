@@ -280,6 +280,12 @@ function getRoomHtml(webview: vscode.Webview, distRoot: vscode.Uri): string {
     .claude-result { opacity: 0.6; padding-top: 4px; border-top: 1px dashed var(--vscode-panel-border); margin-top: 4px; }
     .claude-error { color: var(--vscode-errorForeground); }
     .claude-other { opacity: 0.35; }
+    .claude-tool-card { margin: 6px 0; padding: 6px 8px; border-left: 2px solid var(--vscode-textLink-foreground); background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.08)); border-radius: 0 3px 3px 0; }
+    .claude-tool-card.claude-tool-error { border-left-color: var(--vscode-errorForeground); }
+    .claude-tool-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+    .claude-tool-name { font-weight: 600; color: var(--vscode-textLink-foreground); }
+    .claude-tool-input { opacity: 0.85; word-break: break-all; }
+    .claude-tool-result { margin-top: 4px; padding-left: 12px; opacity: 0.75; white-space: pre-wrap; word-wrap: break-word; }
     .pane-busy { opacity: 0.7; font-weight: 400; font-size: 11px; }
     button { font: inherit; padding: 4px 10px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 3px; cursor: pointer; }
     button:hover { background: var(--vscode-button-hoverBackground); }
