@@ -14,7 +14,14 @@ interface ClaudeProps {
 
 export function Claude({ events, state }: ClaudeProps): React.ReactElement {
   const blocks = React.useMemo(() => processClaude(events), [events]);
-  const scrollRef = useStickyScroll(blocks.length);
+  // Hide successful hook rows — they're nearly all the noise. Pending
+  // (transient) and failed hooks still surface so the user can see
+  // when something's actually wrong with the hook stack.
+  const visible = React.useMemo(
+    () => blocks.filter((b) => !(b.kind === 'hook' && b.status === 'ok')),
+    [blocks],
+  );
+  const scrollRef = useStickyScroll(visible.length);
   const busyLabel = state.busy
     ? state.queued > 0
       ? `· busy (${state.queued} queued)`
@@ -26,10 +33,10 @@ export function Claude({ events, state }: ClaudeProps): React.ReactElement {
         claude {busyLabel && <span className="pane-busy">{busyLabel}</span>}
       </h2>
       <div className="claude-log" ref={scrollRef}>
-        {blocks.length === 0 ? (
+        {visible.length === 0 ? (
           <div className="muted">(idle — @-mention me from chat to start)</div>
         ) : (
-          blocks.map((b, i) => <BlockRow key={i} block={b} />)
+          visible.map((b, i) => <BlockRow key={i} block={b} />)
         )}
       </div>
     </div>
