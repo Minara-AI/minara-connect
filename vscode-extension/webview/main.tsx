@@ -15,51 +15,29 @@ declare global {
 
 const vscode = window.acquireVsCodeApi();
 
-const MOCK_MESSAGES: Message[] = [
-  {
-    id: '01J0000000000000000000000A',
-    author: 'k7zptbase32example',
-    nick: 'alice',
-    ts: 1714650000000,
-    kind: 'chat',
-    body: 'Redis or Postgres for the new service?',
-  },
-  {
-    id: '01J0000000000000000000000B',
-    author: 'h6yqwbase32example',
-    nick: 'bob',
-    ts: 1714650005000,
-    kind: 'chat',
-    body: 'postgres, we have it everywhere already',
-  },
-  {
-    id: '01J0000000000000000000000C',
-    author: 'h6yqwbase32example',
-    nick: 'bob',
-    ts: 1714650010000,
-    kind: 'chat',
-    body: '@alice can you double-check the migration plan before we lock it in?',
-  },
-  {
-    id: '01J0000000000000000000000D',
-    author: 'k7zptbase32example',
-    nick: 'alice',
-    ts: 1714650020000,
-    kind: 'chat',
-    body: 'going Postgres per the chat — drafting the migration now',
-  },
-];
-
 function App(): React.ReactElement {
   const [status, setStatus] = React.useState('waiting for host…');
+  const [messages, setMessages] = React.useState<Message[]>([]);
+  const [myNick, setMyNick] = React.useState('(me)');
+  const [topic, setTopic] = React.useState('');
 
   React.useEffect(() => {
-    const onMsg = (event: MessageEvent) => {
+    const onMsg = (event: MessageEvent): void => {
       const msg = (event.data ?? {}) as { type?: string; body?: unknown };
       if (msg.type === 'host:ready') {
-        setStatus('host ready ✓');
+        setStatus('host ready ✓ — tailing log.jsonl');
       } else if (msg.type === 'echo:reply') {
         setStatus(`host replied: ${String(msg.body)}`);
+      } else if (msg.type === 'room:state') {
+        const b = (msg.body ?? {}) as { topic?: string; myNick?: string };
+        if (b.topic) setTopic(b.topic);
+        if (b.myNick) setMyNick(b.myNick);
+      } else if (msg.type === 'chat:message') {
+        const m = msg.body as Message;
+        setMessages((prev) => {
+          if (prev.some((x) => x.id === m.id)) return prev;
+          return [...prev, m].sort((a, b) => a.id.localeCompare(b.id));
+        });
       }
     };
     window.addEventListener('message', onMsg);
@@ -75,9 +53,12 @@ function App(): React.ReactElement {
 
   return (
     <React.Fragment>
-      <h1>cc-connect — placeholder</h1>
+      <h1>cc-connect — Room</h1>
+      <p className="room-meta">
+        topic: {topic ? `${topic.slice(0, 16)}…` : '(unknown)'} · me: {myNick}
+      </p>
       <div className="panes">
-        <Chat messages={MOCK_MESSAGES} myNick="alice" />
+        <Chat messages={messages} myNick={myNick} />
         <div className="pane">
           <h2>claude</h2>
           <div className="muted">(no Claude session — Step 4 will wire SDK)</div>

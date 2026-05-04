@@ -12,7 +12,7 @@ export function Chat({ messages, myNick }: ChatProps): React.ReactElement {
       <h2>chat</h2>
       <div className="chat-log">
         {messages.length === 0 ? (
-          <div className="muted">(no messages)</div>
+          <div className="muted">(no messages yet — waiting for log.jsonl tail…)</div>
         ) : (
           messages.map((m) => <ChatLine key={m.id} message={m} myNick={myNick} />)
         )}

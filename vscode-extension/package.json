@@ -29,7 +29,7 @@
       },
       {
         "command": "cc-connect.openRoom",
-        "title": "Open Room (placeholder)",
+        "title": "Open Room",
         "category": "cc-connect"
       }
     ]
