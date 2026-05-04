@@ -64,6 +64,13 @@ export function createClaudeRunner(
         includeHookEvents: true,
         abortController: ac,
         env: { ...process.env, CC_CONNECT_ROOM: opts.topic },
+        // v0 trust posture: auto-allow every tool. The headless SDK
+        // path has nowhere to surface a permission prompt — without
+        // this, mcp__cc-connect__cc_at (Claude's only path back into
+        // the Room) gets denied and Claude gives up on the round-
+        // trip. Real per-tool approval UI in the Claude panel is
+        // tracked as a §8 deferred item in the design doc.
+        canUseTool: async () => ({ behavior: 'allow' as const }),
       },
     });
     hasStarted = true;
