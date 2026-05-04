@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { startChatDaemon, startHostBg } from './host/daemon';
 import { ccSend } from './host/ipc';
 import { tailLog, type LogTailHandle } from './host/log_tail';
 import type { Message } from './types';
@@ -12,19 +13,88 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.window.showInformationMessage('cc-connect: hello');
     }),
     vscode.commands.registerCommand('cc-connect.openRoom', () => {
-      void openRoomPanel(context);
+      void openRoomFromPicker(context);
+    }),
+    vscode.commands.registerCommand('cc-connect.startRoom', () => {
+      void startRoom(context);
+    }),
+    vscode.commands.registerCommand('cc-connect.joinRoom', () => {
+      void joinRoom(context);
     }),
   );
 }
 
 export function deactivate(): void {}
 
-async function openRoomPanel(
+async function openRoomFromPicker(
   context: vscode.ExtensionContext,
 ): Promise<void> {
   const topic = await pickTopic();
   if (!topic) return;
+  openRoomPanelForTopic(context, topic);
+}
 
+async function startRoom(context: vscode.ExtensionContext): Promise<void> {
+  let ticket: string;
+  let topic: string;
+  try {
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'cc-connect: starting Room…',
+        cancellable: false,
+      },
+      async () => {
+        ticket = await startHostBg();
+        topic = await startChatDaemon(ticket);
+      },
+    );
+  } catch (e) {
+    void vscode.window.showErrorMessage(
+      `cc-connect: failed to start Room — ${(e as Error).message}`,
+    );
+    return;
+  }
+  await vscode.env.clipboard.writeText(ticket!);
+  void vscode.window.showInformationMessage(
+    'cc-connect: Room started. Ticket copied to clipboard.',
+  );
+  openRoomPanelForTopic(context, topic!);
+}
+
+async function joinRoom(context: vscode.ExtensionContext): Promise<void> {
+  const ticket = await vscode.window.showInputBox({
+    prompt: 'Paste a cc-connect Ticket',
+    placeHolder: 'cc1-…',
+    ignoreFocusOut: true,
+    validateInput: (v) =>
+      v.trim().startsWith('cc1-') ? undefined : 'Ticket must start with cc1-',
+  });
+  if (!ticket) return;
+
+  let topic: string;
+  try {
+    topic = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: 'cc-connect: joining Room…',
+        cancellable: false,
+      },
+      () => startChatDaemon(ticket.trim()),
+    );
+  } catch (e) {
+    void vscode.window.showErrorMessage(
+      `cc-connect: failed to join Room — ${(e as Error).message}`,
+    );
+    return;
+  }
+  openRoomPanelForTopic(context, topic);
+}
+
+function openRoomPanelForTopic(
+  context: vscode.ExtensionContext,
+  topic: string,
+): void {
   const distRoot = vscode.Uri.joinPath(
     context.extensionUri,
     'dist',
@@ -98,24 +168,22 @@ async function pickTopic(): Promise<string | undefined> {
   const roomsDir = path.join(os.homedir(), '.cc-connect', 'rooms');
   let entries: string[];
   try {
-    entries = fs
-      .readdirSync(roomsDir)
-      .filter((n) => {
-        try {
-          return fs.statSync(path.join(roomsDir, n)).isDirectory();
-        } catch {
-          return false;
-        }
-      });
+    entries = fs.readdirSync(roomsDir).filter((n) => {
+      try {
+        return fs.statSync(path.join(roomsDir, n)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
   } catch {
     void vscode.window.showErrorMessage(
-      'cc-connect: ~/.cc-connect/rooms/ not found. Start a Room with `cc-connect room start`.',
+      'cc-connect: ~/.cc-connect/rooms/ not found. Start a Room with `cc-connect: Start Room`.',
     );
     return undefined;
   }
   if (entries.length === 0) {
     void vscode.window.showErrorMessage(
-      'cc-connect: no Rooms found. Start one with `cc-connect room start`.',
+      'cc-connect: no Rooms found. Start one with `cc-connect: Start Room`.',
     );
     return undefined;
   }

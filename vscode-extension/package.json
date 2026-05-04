@@ -18,7 +18,9 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onCommand:cc-connect.hello",
-    "onCommand:cc-connect.openRoom"
+    "onCommand:cc-connect.openRoom",
+    "onCommand:cc-connect.startRoom",
+    "onCommand:cc-connect.joinRoom"
   ],
   "contributes": {
     "commands": [
@@ -28,8 +30,18 @@
         "category": "cc-connect"
       },
       {
+        "command": "cc-connect.startRoom",
+        "title": "Start Room",
+        "category": "cc-connect"
+      },
+      {
+        "command": "cc-connect.joinRoom",
+        "title": "Join Room…",
+        "category": "cc-connect"
+      },
+      {
         "command": "cc-connect.openRoom",
-        "title": "Open Room",
+        "title": "Open Room (existing)",
         "category": "cc-connect"
       }
     ]
