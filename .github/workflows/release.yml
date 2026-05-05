@@ -76,9 +76,17 @@ jobs:
           version="${ref#v}"
           name="cc-connect-${version}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
-          for bin in cc-connect cc-connect-hook cc-chat-ui; do
+          # All five binaries the workspace produces. install.sh
+          # hard-requires cc-connect-mcp (line ~210) and warns if
+          # cc-connect-tui is missing (line ~393), so ship both.
+          for bin in cc-connect cc-connect-tui cc-connect-hook cc-connect-mcp cc-chat-ui; do
             cp "target/${{ matrix.target }}/release/${bin}" "dist/${name}/"
           done
+          # install.sh — bootstrap.sh's tarball path runs it with
+          # `--skip-build` to register the hook + MCP server. Bundling
+          # it here keeps the tarball self-contained (no second curl
+          # to raw.githubusercontent.com needed at install time).
+          cp install.sh "dist/${name}/"
           cp README.md LICENSE-MIT LICENSE-APACHE SECURITY.md "dist/${name}/"
           cd dist && tar -czf "${name}.tar.gz" "${name}"
           shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256"
