@@ -236,9 +236,18 @@ function roomHtml(webview: vscode.Webview, distRoot: vscode.Uri): string {
     .mention.broadcast { font-style: italic; }
 
     /* Both panes' inputs share styling */
-    .pane-input { padding: 6px 10px 8px; flex: 0 0 auto; border-top: 1px solid var(--vscode-panel-border); }
-    .pane-input textarea { width: 100%; box-sizing: border-box; resize: none; min-height: 32px; max-height: 140px; padding: 6px 10px; font: inherit; font-size: 12.5px; line-height: 1.45; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 14px; outline: none; }
+    .pane-input { position: relative; padding: 6px 10px 8px; flex: 0 0 auto; border-top: 1px solid var(--vscode-panel-border); display: flex; align-items: flex-end; gap: 6px; }
+    .pane-input textarea { flex: 1; min-width: 0; box-sizing: border-box; resize: none; min-height: 32px; max-height: 140px; padding: 7px 12px; font: inherit; font-size: 12.5px; line-height: 1.45; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 16px; outline: none; overflow-y: auto; }
     .pane-input textarea:focus { border-color: var(--vscode-focusBorder); }
+    .send-btn { flex: 0 0 auto; width: 30px; height: 30px; padding: 0; border-radius: 50%; background: var(--vscode-textLink-foreground); color: var(--vscode-editor-background); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: opacity 0.12s; }
+    .send-btn:hover:not(:disabled) { background: var(--vscode-button-hoverBackground, var(--vscode-textLink-foreground)); opacity: 0.9; }
+    .send-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+    .send-btn svg { display: block; }
+    /* Mention popup — anchored above the chat input */
+    .mention-popup { position: absolute; bottom: calc(100% - 4px); left: 10px; right: 10px; max-height: 160px; overflow-y: auto; background: var(--vscode-quickInput-background, var(--vscode-editorWidget-background, var(--vscode-input-background))); border: 1px solid var(--vscode-focusBorder, var(--vscode-panel-border)); border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.25); z-index: 10; padding: 2px; font-size: 12px; }
+    .mention-item { padding: 4px 10px; border-radius: 4px; cursor: pointer; user-select: none; }
+    .mention-item:hover { background: var(--vscode-list-hoverBackground); }
+    .mention-item.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 
     /* ========== Claude (agent-style) ========== */
     .claude-log { flex: 1; min-height: 0; padding: 4px 10px 6px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }

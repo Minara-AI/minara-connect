@@ -6,6 +6,7 @@ import {
   EditDiffView,
   ExpandableText,
 } from './ToolCardBody';
+import { useAutosize } from './useAutosize';
 import { useStickyScroll } from './useStickyScroll';
 
 export interface ClaudeRunnerState {
@@ -32,6 +33,11 @@ export function Claude({
   );
   const scrollRef = useStickyScroll(visible.length);
   const [draft, setDraft] = React.useState('');
+  const textareaRef = useAutosize(draft);
+
+  React.useEffect(() => {
+    textareaRef.current?.focus();
+  }, [textareaRef]);
 
   const busyLabel = state.busy
     ? state.queued > 0
@@ -70,12 +76,23 @@ export function Claude({
       {onPrompt && (
         <div className="pane-input">
           <textarea
+            ref={textareaRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Ask Claude — Enter to send · Shift+Enter for newline"
             rows={1}
           />
+          <button
+            type="button"
+            className="send-btn"
+            onClick={submit}
+            disabled={draft.trim().length === 0}
+            aria-label="Send"
+            title="Send (Enter)"
+          >
+            <SendIcon />
+          </button>
         </div>
       )}
     </div>
@@ -215,6 +232,20 @@ function ToolResultView({
     return <BashResultView text={fullText} isError={isError} />;
   }
   return <ExpandableText text={fullText} isError={isError} />;
+}
+
+function SendIcon(): React.ReactElement {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M1.7 1.4a.6.6 0 0 1 .7-.05l11.7 6a.6.6 0 0 1 0 1.06l-11.7 6.1a.6.6 0 0 1-.86-.7l1.5-4.95a.6.6 0 0 1 .47-.42l5.34-.93a.2.2 0 0 0 0-.4l-5.34-.93a.6.6 0 0 1-.47-.42l-1.5-4.95a.6.6 0 0 1 .16-.6z" />
+    </svg>
+  );
 }
 
 function shortenToolName(name: string): string {
