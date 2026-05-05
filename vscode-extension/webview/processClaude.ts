@@ -14,6 +14,19 @@ export type ClaudeBlock =
   | { kind: 'hook'; hookId: string; hookName: string; status: 'pending' | 'ok' | 'fail'; exitCode?: number }
   | { kind: 'thinking'; elapsedMs: number; ongoing: boolean }
   | { kind: 'prompt'; text: string }
+  | {
+      kind: 'permission';
+      requestId: string;
+      toolName: string;
+      summary: string;
+      title?: string;
+      description?: string;
+      blockedPath?: string;
+      decisionReason?: string;
+      ts?: number;
+      canAlwaysAllow?: boolean;
+      status: 'pending' | 'allowed' | 'denied' | 'always-allowed';
+    }
   | { kind: 'text'; text: string }
   | {
       kind: 'tool';
@@ -82,6 +95,7 @@ export function processClaude(
   const blocks: ClaudeBlock[] = [];
   const hookIdxById = new Map<string, number>();
   const toolIdxByUseId = new Map<string, number>();
+  const permissionIdxByReqId = new Map<string, number>();
 
   // Per-turn thinking tracker: when a `system:init` lands we record
   // its wall-clock arrival; when the first text/tool of that turn
@@ -108,6 +122,62 @@ export function processClaude(
 
     if (t === 'cc:user-prompt' && typeof ev.body === 'string') {
       blocks.push({ kind: 'prompt', text: ev.body });
+      continue;
+    }
+
+    if (t === 'cc:permission-request') {
+      const r = raw as {
+        requestId?: string;
+        toolName?: string;
+        toolUseID?: string;
+        input?: Record<string, unknown>;
+        title?: string;
+        description?: string;
+        blockedPath?: string;
+        decisionReason?: string;
+        ts?: number;
+        canAlwaysAllow?: boolean;
+      };
+      if (typeof r.requestId === 'string' && typeof r.toolName === 'string') {
+        const summary = summariseToolInput(r.toolName, r.input ?? {});
+        blocks.push({
+          kind: 'permission',
+          requestId: r.requestId,
+          toolName: r.toolName,
+          summary,
+          title: r.title,
+          description: r.description,
+          blockedPath: r.blockedPath,
+          decisionReason: r.decisionReason,
+          ts: r.ts,
+          canAlwaysAllow: r.canAlwaysAllow,
+          status: 'pending',
+        });
+        permissionIdxByReqId.set(r.requestId, blocks.length - 1);
+      }
+      continue;
+    }
+
+    if (t === 'cc:permission-resolved') {
+      const r = raw as {
+        requestId?: string;
+        behavior?: 'allow' | 'deny' | 'always-allow';
+      };
+      if (typeof r.requestId === 'string') {
+        const idx = permissionIdxByReqId.get(r.requestId);
+        if (idx !== undefined) {
+          const prev = blocks[idx];
+          if (prev?.kind === 'permission') {
+            const status =
+              r.behavior === 'always-allow'
+                ? 'always-allowed'
+                : r.behavior === 'allow'
+                  ? 'allowed'
+                  : 'denied';
+            blocks[idx] = { ...prev, status };
+          }
+        }
+      }
       continue;
     }
 
@@ -267,6 +337,34 @@ function stripPromptWrappers(raw: string): string {
     s = s.slice(m[0].length);
   }
   return s.trim();
+}
+
+/** Compact human-readable rendering of a tool's input for the
+ *  permission bubble. We mirror the heuristic used in Claude.tsx for
+ *  ToolCard but at a much shorter character cap — the bubble is a
+ *  small inline UI, not a full card. */
+function summariseToolInput(
+  toolName: string,
+  input: Record<string, unknown>,
+): string {
+  const candidates: Record<string, string[]> = {
+    Read: ['file_path', 'path'],
+    Edit: ['file_path', 'path'],
+    Write: ['file_path', 'path'],
+    Bash: ['command'],
+    Grep: ['pattern'],
+    Glob: ['pattern'],
+  };
+  const short = /^mcp__[^_]+(?:[^_]|_[^_])*?__(.+)$/.exec(toolName)?.[1] ?? toolName;
+  const keys = candidates[short] ?? Object.keys(input);
+  const parts: string[] = [];
+  for (const k of keys.slice(0, 1)) {
+    const v = input[k];
+    if (v === undefined) continue;
+    const s = typeof v === 'string' ? v : JSON.stringify(v);
+    parts.push(s.length > 80 ? s.slice(0, 77) + '…' : s);
+  }
+  return parts.join(' · ');
 }
 
 function stringifyContent(

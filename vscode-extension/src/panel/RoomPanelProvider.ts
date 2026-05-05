@@ -151,9 +151,26 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
           if (
             mode === 'bypassPermissions' ||
             mode === 'acceptEdits' ||
-            mode === 'plan'
+            mode === 'plan' ||
+            mode === 'default'
           ) {
             this.runner?.setPermissionMode(mode);
+          }
+        } else if (msg.type === 'claude:permission-response') {
+          const b = msg.body as
+            | {
+                requestId?: string;
+                behavior?: 'allow' | 'deny' | 'always-allow';
+              }
+            | undefined;
+          if (
+            b &&
+            typeof b.requestId === 'string' &&
+            (b.behavior === 'allow' ||
+              b.behavior === 'deny' ||
+              b.behavior === 'always-allow')
+          ) {
+            this.runner?.resolvePermission(b.requestId, b.behavior);
           }
         } else if (msg.type === 'history:list') {
           // List Claude transcripts for the current workspace cwd.
@@ -456,8 +473,38 @@ function roomHtml(webview: vscode.Webview, distRoot: vscode.Uri): string {
     .mode-pill.mode-acceptEdits:hover { background: rgba(214,168,83,0.30); }
     .mode-pill.mode-plan { background: rgba(110,192,123,0.18); color: var(--vscode-charts-green, #6ec07b); border-color: rgba(110,192,123,0.4); }
     .mode-pill.mode-plan:hover { background: rgba(110,192,123,0.30); }
+    .mode-pill.mode-default { background: rgba(255,165,80,0.18); color: var(--vscode-charts-orange, #d59155); border-color: rgba(255,165,80,0.4); }
+    .mode-pill.mode-default:hover { background: rgba(255,165,80,0.30); }
+
+    /* Permission bubble — inline approval prompt for default mode */
+    .permission-bubble { margin: 4px 0; padding: 8px 10px; border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-charts-orange, #d59155)); background: var(--vscode-inputValidation-warningBackground, rgba(214,168,83,0.10)); border-radius: 4px; font-size: 12px; }
+    .permission-bubble.permission-allowed { border-color: var(--vscode-charts-green, #6ec07b); background: rgba(110,192,123,0.08); opacity: 0.75; }
+    .permission-bubble.permission-always-allowed { border-color: var(--vscode-charts-blue, #5fa8d3); background: rgba(95,168,211,0.08); opacity: 0.75; }
+    .permission-bubble.permission-denied { border-color: var(--vscode-errorForeground); background: rgba(255,80,80,0.08); opacity: 0.75; }
+    .permission-bubble-head { display: flex; align-items: center; gap: 6px; }
+    .permission-bubble-head .codicon { font-size: 13px; opacity: 0.9; }
+    .permission-bubble-title { flex: 1; font-weight: 600; word-break: break-word; }
+    .permission-bubble-state { font-size: 10.5px; padding: 1px 6px; border-radius: 8px; background: rgba(127,127,127,0.18); text-transform: uppercase; letter-spacing: 0.06em; }
+    .permission-bubble.permission-allowed .permission-bubble-state { background: rgba(110,192,123,0.22); color: var(--vscode-charts-green, #6ec07b); }
+    .permission-bubble.permission-always-allowed .permission-bubble-state { background: rgba(95,168,211,0.22); color: var(--vscode-charts-blue, #5fa8d3); }
+    .permission-bubble.permission-denied .permission-bubble-state { background: rgba(255,80,80,0.22); color: var(--vscode-errorForeground); }
+    .permission-bubble-ts { font-size: 10.5px; opacity: 0.45; font-family: var(--vscode-editor-font-family, monospace); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+    .permission-bubble-desc { margin-top: 4px; font-size: 11.5px; opacity: 0.75; line-height: 1.45; }
+    .permission-bubble-summary { margin-top: 4px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); opacity: 0.85; word-break: break-all; }
+    .permission-bubble-meta { margin-top: 3px; font-size: 11px; display: flex; gap: 6px; align-items: baseline; opacity: 0.7; }
+    .permission-bubble-meta code { font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; background: var(--vscode-textCodeBlock-background); padding: 1px 4px; border-radius: 2px; word-break: break-all; }
+    .permission-bubble-actions { display: flex; gap: 6px; margin-top: 8px; justify-content: flex-end; }
+    .permission-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 12px; border-radius: 3px; font-size: 11.5px; cursor: pointer; border: 1px solid var(--vscode-button-border, transparent); }
+    .permission-btn .codicon { font-size: 12px; }
+    .permission-btn-allow { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+    .permission-btn-allow:hover { background: var(--vscode-button-hoverBackground); }
+    .permission-btn-deny { background: var(--vscode-button-secondaryBackground, rgba(127,127,127,0.18)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); }
+    .permission-btn-deny:hover { background: var(--vscode-button-secondaryHoverBackground, rgba(127,127,127,0.30)); }
+    .permission-btn-always { background: rgba(95,168,211,0.16); color: var(--vscode-charts-blue, #5fa8d3); border-color: rgba(95,168,211,0.4); }
+    .permission-btn-always:hover { background: rgba(95,168,211,0.28); }
     .pane-input textarea { flex: 1; min-width: 0; box-sizing: border-box; resize: none; min-height: 32px; max-height: 140px; padding: 7px 12px; font: inherit; font-size: 12.5px; line-height: 1.45; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 16px; outline: none; overflow-y: auto; }
     .pane-input textarea:focus { border-color: var(--vscode-focusBorder); }
+    .pane-input textarea:disabled { opacity: 0.55; cursor: not-allowed; background: var(--vscode-input-background); }
     .send-btn { flex: 0 0 auto; width: 30px; height: 30px; padding: 0; border-radius: 50%; background: var(--vscode-textLink-foreground); color: var(--vscode-editor-background); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: opacity 0.12s; }
     .send-btn:hover:not(:disabled) { background: var(--vscode-button-hoverBackground, var(--vscode-textLink-foreground)); opacity: 0.9; }
     .send-btn:disabled { opacity: 0.25; cursor: not-allowed; }

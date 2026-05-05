@@ -68,7 +68,7 @@ already exposes `q.interrupt()` and we already track an
 
 **Effort**: 1–2 hours.
 
-### ◐ T1.3 — Permission-mode toggle ("Edit automatically" / "Ask before edits") — pill shipped, inline approval bubble for `default` deferred
+### ☑ T1.3 — Permission-mode toggle ("Edit automatically" / "Ask before edits") — pill + inline approval bubble shipped
 
 **Pattern observed**: A toggle pill in the toolbar at the bottom of
 the chat: "Edit automatically" | "Ask before edits" | (plan-mode).
@@ -305,12 +305,13 @@ cc-connect's scope or are already covered:
 
 ## Progress (2026-05-05 batch)
 
-12 of 13 items shipped this session:
+12 of 13 items fully shipped, plus the originally-deferred T1.3
+inline approval path landed in the same session:
 
 - ☑ T1.1 step timeline · ☑ T1.2 stop · ☑ T1.4 queue pill ·
   ☑ T1.5 thinking
-- ◐ T1.3 permission pill (auto / ask edits / plan modes; inline
-  bubble for `default` deferred)
+- ☑ T1.3 permission pill (auto / ask edits / plan / ask all) +
+  inline approval bubble for `default` mode
 - ☑ T2.1 slash · ☑ T2.2 attach · ☑ T2.3 history · ☑ T2.4 new chat
 - ◐ T2.5 titles (v0 first-prompt; v1 Claude-summarized deferred)
 - ☑ T3.1 file-ref chips · ☑ T3.2 IN/OUT layout · ☑ T3.3 (rolled into T1.1)
@@ -333,11 +334,8 @@ Plus (post-plan additions in this batch):
 
 Remaining:
 
-- ☐ T1.3-v1 inline approval bubble for `default` mode (canUseTool
-  path requires a webview-side approval dialog; gated on resolving
-  the SDK's headless ZodError on `default`)
 - ◐ T2.5-v1 Claude-summarized titles (4h — call SDK once on session
-  close to summarise; paired with T1.3 quota concerns)
+  close to summarise; v0 first-prompt-30 chars already shipped)
 - ☐ T3.4 voice (out of scope per design)
 
 ## Suggested implementation order

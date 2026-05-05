@@ -226,6 +226,16 @@ function App(): React.ReactElement {
     vscode.postMessage({ type: 'claude:permission-mode', body: mode });
   };
 
+  const onPermissionResponse = (
+    requestId: string,
+    behavior: 'allow' | 'deny' | 'always-allow',
+  ): void => {
+    vscode.postMessage({
+      type: 'claude:permission-response',
+      body: { requestId, behavior },
+    });
+  };
+
   return (
     <React.Fragment>
       <div className="room-meta">
@@ -286,6 +296,7 @@ function App(): React.ReactElement {
             onResetSession={onResetSession}
             onOpenFile={onOpenFile}
             onPermissionMode={onPermissionMode}
+            onPermissionResponse={onPermissionResponse}
             activeEditor={activeEditor}
             history={{
               viewing: viewingSessionId,

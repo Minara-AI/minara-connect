@@ -22,7 +22,10 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   query,
+  type CanUseTool,
   type PermissionMode,
+  type PermissionResult,
+  type PermissionUpdate,
   type Query,
 } from '@anthropic-ai/claude-agent-sdk';
 
@@ -32,14 +35,51 @@ export interface ClaudeRunnerState {
   mode: SupportedPermissionMode;
 }
 
-/** Subset we expose in the UI. We intentionally don't surface `default`
- *  (which prompts on every tool call) — under the SDK's headless mode
- *  that path can throw ZodError on some tool calls. `dontAsk` / `auto`
- *  are SDK internals not meant for end-user toggling. */
+/** Subset we expose in the UI. `default` opts into per-tool approval —
+ *  the runner installs a `canUseTool` callback that pauses each tool
+ *  call until the webview's inline Allow/Deny bubble resolves. The
+ *  SDK's `dontAsk` / `auto` are internals not meant for end-user
+ *  toggling. */
 export type SupportedPermissionMode =
   | 'bypassPermissions'
   | 'acceptEdits'
-  | 'plan';
+  | 'plan'
+  | 'default';
+
+/** Event the runner emits via onEvent when `default` mode triggers a
+ *  per-tool approval. Webview renders an inline bubble; user reply
+ *  travels back through the panel provider's `claude:permission-response`
+ *  postMessage which calls `runner.resolvePermission(id, behavior)`. */
+export interface PermissionRequestEvent {
+  type: 'cc:permission-request';
+  requestId: string;
+  toolName: string;
+  toolUseID: string;
+  input: Record<string, unknown>;
+  /** Sentence rendered by the SDK ("Claude wants to …"). Falls back
+   *  to a synthesised one when missing. */
+  title?: string;
+  description?: string;
+  blockedPath?: string;
+  decisionReason?: string;
+  /** Wall-clock ms when the SDK asked. The bubble renders an HH:MM
+   *  stamp so users coming back to a paused turn can see how stale it
+   *  is. */
+  ts: number;
+  /** True when the SDK supplied `suggestions` for the
+   *  `always-allow this tool` shortcut — not every permission probe
+   *  has them (path-blocked Bash calls usually do; raw MCP probes
+   *  often don't). */
+  canAlwaysAllow: boolean;
+}
+
+export interface PermissionResolveEvent {
+  type: 'cc:permission-resolved';
+  requestId: string;
+  behavior: 'allow' | 'deny' | 'always-allow';
+}
+
+export type PermissionBehaviorChoice = 'allow' | 'deny' | 'always-allow';
 
 export interface ClaudeRunnerOptions {
   topic: string;
@@ -69,6 +109,14 @@ export interface ClaudeRunnerHandle {
    *  turn is in flight, also calls `query.setPermissionMode(mode)` so
    *  the live conversation flips immediately. */
   setPermissionMode(mode: SupportedPermissionMode): void;
+  /** Webview's reply to a `cc:permission-request` event. No-op if the
+   *  request id is unknown (timeout, runner reset, double-click, …).
+   *  `always-allow` adds the SDK's suggested rules to the in-flight
+   *  query so the same tool/input shape won't prompt again. */
+  resolvePermission(
+    requestId: string,
+    behavior: PermissionBehaviorChoice,
+  ): void;
   /** Tear the runner down: cancel current + clear queue. Used on
    *  panel dispose. */
   abort(): void;
@@ -92,6 +140,85 @@ export function createClaudeRunner(
   // via the UI pill — pure auto-bypass is the most common ergonomic
   // choice for cc-connect's "trusted Room" model.
   let currentMode: SupportedPermissionMode = 'bypassPermissions';
+
+  // Pending permission requests keyed by requestId. Populated when
+  // the SDK calls our canUseTool callback in `default` mode; resolved
+  // when the webview's bubble click reaches resolvePermission(). On
+  // runner abort / reset, every pending request is denied with
+  // `interrupt: true` so the SDK breaks out of the in-flight tool call.
+  const pendingPermissions = new Map<
+    string,
+    (result: PermissionResult) => void
+  >();
+  // SDK's `ctx.suggestions` per request — stored so `always-allow`
+  // can echo them back as `updatedPermissions`. Cleared on resolve.
+  const suggestionsByRequestId = new Map<string, PermissionUpdate[]>();
+  let permissionSeq = 0;
+
+  const canUseTool: CanUseTool = (toolName, input, ctx) => {
+    return new Promise<PermissionResult>((resolve) => {
+      const requestId = `perm-${++permissionSeq}`;
+      pendingPermissions.set(requestId, resolve);
+      const suggestions = ctx.suggestions ?? [];
+      if (suggestions.length > 0) {
+        suggestionsByRequestId.set(requestId, suggestions);
+      }
+
+      // If the SDK aborts the operation (turn cancelled / runner
+      // killed), resolve as a deny so the awaited promise unblocks.
+      const onAbort = (): void => {
+        const fn = pendingPermissions.get(requestId);
+        if (fn) {
+          pendingPermissions.delete(requestId);
+          suggestionsByRequestId.delete(requestId);
+          fn({
+            behavior: 'deny',
+            message: 'permission request aborted',
+            interrupt: true,
+          });
+        }
+      };
+      ctx.signal.addEventListener('abort', onAbort, { once: true });
+
+      const event: PermissionRequestEvent = {
+        type: 'cc:permission-request',
+        requestId,
+        toolName,
+        toolUseID: ctx.toolUseID,
+        input,
+        title: ctx.title,
+        description: ctx.description,
+        blockedPath: ctx.blockedPath,
+        decisionReason: ctx.decisionReason,
+        ts: Date.now(),
+        canAlwaysAllow: suggestions.length > 0,
+      };
+      try {
+        opts.onEvent(event);
+      } catch {
+        // Webview unreachable — auto-deny so the turn doesn't hang.
+        pendingPermissions.delete(requestId);
+        suggestionsByRequestId.delete(requestId);
+        resolve({
+          behavior: 'deny',
+          message: 'webview unreachable; cannot prompt for approval',
+          interrupt: true,
+        });
+      }
+    });
+  };
+
+  function denyAllPending(reason: string): void {
+    for (const [, fn] of pendingPermissions) {
+      try {
+        fn({ behavior: 'deny', message: reason, interrupt: true });
+      } catch {
+        /* swallow */
+      }
+    }
+    pendingPermissions.clear();
+    suggestionsByRequestId.clear();
+  }
 
   // Auto-greet on Room join — mirrors the TUI's launcher-script path
   // (`claude-wrap.sh` invokes claude with bootstrap-prompt.md as the
@@ -126,21 +253,26 @@ export function createClaudeRunner(
             },
           }
         : {};
+    // Only attach canUseTool when the user is actually in default
+    // mode; the bypassPermissions / acceptEdits / plan paths short-
+    // circuit the callback at the SDK level, and the headless
+    // ZodError pitfall is in *unconditional* canUseTool wiring.
+    const permissionOpt: { canUseTool?: CanUseTool } =
+      currentMode === 'default' ? { canUseTool } : {};
     const q = query({
       prompt,
       options: {
         ...sessionOpt,
         ...systemPromptOpt,
+        ...permissionOpt,
         pathToClaudeCodeExecutable: claudeBin,
         includeHookEvents: true,
         abortController: ac,
         env: { ...process.env, CC_CONNECT_ROOM: opts.topic },
         // The user-selected mode. `bypassPermissions` is the v0
-        // default; `acceptEdits` and `plan` are also supported via
-        // the pane-head pill. `default` is intentionally hidden —
-        // the SDK's headless `canUseTool` path can throw ZodError on
-        // some tool calls, and we don't have a webview-side approval
-        // UI yet.
+        // default; `acceptEdits` and `plan` are toggleable via the
+        // pane-head pill. `default` opts into per-tool approval via
+        // the canUseTool callback above.
         permissionMode: currentMode as PermissionMode,
       },
     });
@@ -206,7 +338,23 @@ export function createClaudeRunner(
     setPermissionMode(mode: SupportedPermissionMode): void {
       if (panelClosed) return;
       if (mode === currentMode) return;
+      const wasDefault = currentMode === 'default';
       currentMode = mode;
+      // Switching out of `default` while a permission request is
+      // pending → auto-allow them. The user just chose a more
+      // permissive posture; making them click each lingering bubble
+      // would feel like the toggle didn't take.
+      if (wasDefault && mode !== 'default' && pendingPermissions.size > 0) {
+        for (const [, fn] of pendingPermissions) {
+          try {
+            fn({ behavior: 'allow' });
+          } catch {
+            /* swallow */
+          }
+        }
+        pendingPermissions.clear();
+        suggestionsByRequestId.clear();
+      }
       // Flip the in-flight conversation immediately if there is one.
       // Errors are swallowed: the next turn will pick up the new mode
       // anyway, so this is best-effort.
@@ -218,10 +366,54 @@ export function createClaudeRunner(
       }
       publishState();
     },
+    resolvePermission(
+      requestId: string,
+      behavior: PermissionBehaviorChoice,
+    ): void {
+      const fn = pendingPermissions.get(requestId);
+      if (!fn) return;
+      pendingPermissions.delete(requestId);
+      const suggestions = suggestionsByRequestId.get(requestId);
+      suggestionsByRequestId.delete(requestId);
+
+      let result: PermissionResult;
+      if (behavior === 'always-allow') {
+        result = {
+          behavior: 'allow',
+          updatedPermissions: suggestions ?? [],
+        };
+      } else if (behavior === 'allow') {
+        result = { behavior: 'allow' };
+      } else {
+        result = {
+          behavior: 'deny',
+          message: 'denied by user',
+          interrupt: false,
+        };
+      }
+      try {
+        fn(result);
+      } catch {
+        /* swallow */
+      }
+      // Echo the resolution back to the webview so the bubble can
+      // collapse / show its final state. Best-effort.
+      const echo: PermissionResolveEvent = {
+        type: 'cc:permission-resolved',
+        requestId,
+        behavior,
+      };
+      try {
+        opts.onEvent(echo);
+      } catch {
+        /* swallow */
+      }
+    },
     resetSession(): void {
       if (panelClosed) return;
       queue.length = 0;
       currentTurnAc?.abort();
+      denyAllPending('session reset');
       sessionUuid = randomUUID();
       hasStarted = false;
       publishState();
@@ -230,6 +422,7 @@ export function createClaudeRunner(
       panelClosed = true;
       queue.length = 0;
       currentTurnAc?.abort();
+      denyAllPending('runner aborted');
       publishState();
     },
   };

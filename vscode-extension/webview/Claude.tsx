@@ -13,7 +13,8 @@ import { useStickyScroll } from './useStickyScroll';
 export type SupportedPermissionMode =
   | 'bypassPermissions'
   | 'acceptEdits'
-  | 'plan';
+  | 'plan'
+  | 'default';
 
 export interface ClaudeRunnerState {
   busy: boolean;
@@ -25,6 +26,7 @@ const MODE_LABEL: Record<SupportedPermissionMode, string> = {
   bypassPermissions: 'auto',
   acceptEdits: 'ask edits',
   plan: 'plan',
+  default: 'ask all',
 };
 
 const MODE_DESCRIPTION: Record<SupportedPermissionMode, string> = {
@@ -33,12 +35,15 @@ const MODE_DESCRIPTION: Record<SupportedPermissionMode, string> = {
   acceptEdits:
     'Ask before edits — Claude can read freely; Edit/Write/Bash prompts.',
   plan: 'Plan mode — Claude can read but cannot run any side-effectful tool.',
+  default:
+    'Ask all — every tool call shows an inline Allow/Deny bubble first.',
 };
 
 const MODE_ORDER: SupportedPermissionMode[] = [
   'bypassPermissions',
   'acceptEdits',
   'plan',
+  'default',
 ];
 
 export interface SessionMetaLite {
@@ -59,6 +64,11 @@ interface ClaudeProps {
   /** The VSCode editor's currently-active file. The Claude input
    *  shows a chip for it; click → insert `@<path>` into the draft. */
   activeEditor?: { path: string; basename: string } | null;
+  /** Webview's reply to a `cc:permission-request` event. */
+  onPermissionResponse?: (
+    requestId: string,
+    behavior: 'allow' | 'deny' | 'always-allow',
+  ) => void;
   history?: {
     viewing?: string;
     sessions: SessionMetaLite[];
@@ -76,6 +86,7 @@ export function Claude({
   onResetSession,
   onOpenFile,
   onPermissionMode,
+  onPermissionResponse,
   activeEditor,
   history,
 }: ClaudeProps): React.ReactElement {
@@ -127,6 +138,19 @@ export function Claude({
     () => blocks.filter((b) => !(b.kind === 'hook' && b.status === 'ok')),
     [blocks],
   );
+  // Block input while a permission bubble is awaiting the user's
+  // click — the next prompt would go ahead of the answer otherwise
+  // and the in-flight tool call would stay frozen.
+  const pendingPermissionCount = React.useMemo(
+    () =>
+      visible.reduce(
+        (n, b) =>
+          b.kind === 'permission' && b.status === 'pending' ? n + 1 : n,
+        0,
+      ),
+    [visible],
+  );
+  const inputDisabled = pendingPermissionCount > 0;
   const scrollRef = useStickyScroll(visible.length);
   const [draft, setDraft] = React.useState('');
   const textareaRef = useAutosize(draft);
@@ -136,11 +160,16 @@ export function Claude({
   }, [textareaRef]);
 
   const busyLabel = state.busy ? '· busy' : '';
-  const placeholder = state.busy
-    ? 'Queue another message — Claude is working…'
-    : 'Ask Claude — Enter to send · Shift+Enter for newline';
+  const placeholder = inputDisabled
+    ? `Awaiting ${pendingPermissionCount} permission ${
+        pendingPermissionCount === 1 ? 'decision' : 'decisions'
+      }…`
+    : state.busy
+      ? 'Queue another message — Claude is working…'
+      : 'Ask Claude — Enter to send · Shift+Enter for newline';
 
   const submit = (): void => {
+    if (inputDisabled) return;
     const trimmed = draft.trim();
     if (!trimmed || !onPrompt) return;
     onPrompt(trimmed);
@@ -224,7 +253,7 @@ export function Claude({
             (idle — type a prompt below or @-mention from chat)
           </div>
         ) : (
-          renderWithTurnSeparators(visible, onOpenFile)
+          renderWithTurnSeparators(visible, onOpenFile, onPermissionResponse)
         )}
       </div>
       {!viewingHistory && state.queued > 0 && (
@@ -255,6 +284,7 @@ export function Claude({
             onKeyDown={onKeyDown}
             placeholder={placeholder}
             rows={1}
+            disabled={inputDisabled}
           />
           {onPermissionMode && (
             <button
@@ -283,7 +313,7 @@ export function Claude({
               type="button"
               className="send-btn"
               onClick={submit}
-              disabled={draft.trim().length === 0}
+              disabled={draft.trim().length === 0 || inputDisabled}
               aria-label="Send"
               title="Send (Enter)"
             >
@@ -302,16 +332,26 @@ export function Claude({
  *  - wraps every other block in a `<StepWrap>` that draws the
  *    vertical timeline + a state-colored bullet. */
 // Only blocks that represent "Claude doing work" get the timeline
-// bullet (tool calls + thinking). Plain assistant text, user prompt
-// echoes, session markers, results — those render flush so the
-// conversation reads like a normal chat instead of a process trace.
+// bullet (tool calls + thinking + permission gate). Plain assistant
+// text, user prompt echoes, session markers, results — those render
+// flush so the conversation reads like a normal chat instead of a
+// process trace.
 function isTimelineBlock(b: ClaudeBlock): boolean {
-  return b.kind === 'tool' || b.kind === 'thinking' || b.kind === 'hook';
+  return (
+    b.kind === 'tool' ||
+    b.kind === 'thinking' ||
+    b.kind === 'hook' ||
+    b.kind === 'permission'
+  );
 }
 
 function renderWithTurnSeparators(
   blocks: ClaudeBlock[],
   onOpenFile?: (path: string) => void,
+  onPermissionResponse?: (
+    requestId: string,
+    behavior: 'allow' | 'deny' | 'always-allow',
+  ) => void,
 ): React.ReactNode[] {
   const out: React.ReactNode[] = [];
   let turn = 0;
@@ -332,7 +372,11 @@ function renderWithTurnSeparators(
       : `claude-flat ${stateClassFor(b)}`;
     out.push(
       <div key={i} className={cls}>
-        <BlockRow block={b} onOpenFile={onOpenFile} />
+        <BlockRow
+          block={b}
+          onOpenFile={onOpenFile}
+          onPermissionResponse={onPermissionResponse}
+        />
       </div>,
     );
   }
@@ -360,6 +404,10 @@ function stateClassFor(b: ClaudeBlock): string {
         : b.status === 'fail'
           ? 'error'
           : 'ok';
+    case 'permission':
+      if (b.status === 'pending') return 'pending';
+      if (b.status === 'denied') return 'error';
+      return 'ok'; // allowed | always-allowed
     case 'error':
       return 'error';
   }
@@ -368,9 +416,14 @@ function stateClassFor(b: ClaudeBlock): string {
 function BlockRow({
   block,
   onOpenFile,
+  onPermissionResponse,
 }: {
   block: ClaudeBlock;
   onOpenFile?: (path: string) => void;
+  onPermissionResponse?: (
+    requestId: string,
+    behavior: 'allow' | 'deny' | 'always-allow',
+  ) => void;
 }): React.ReactElement | null {
   switch (block.kind) {
     case 'session':
@@ -427,6 +480,13 @@ function BlockRow({
       );
     case 'tool':
       return <ToolCard block={block} />;
+    case 'permission':
+      return (
+        <PermissionBubble
+          block={block}
+          onRespond={onPermissionResponse}
+        />
+      );
     case 'result': {
       const cost =
         typeof block.costUsd === 'number'
@@ -589,6 +649,98 @@ function relativeTime(ms: number): string {
   const day = Math.floor(hr / 24);
   if (day < 7) return `${day}d ago`;
   return new Date(ms).toISOString().slice(0, 10);
+}
+
+function PermissionBubble({
+  block,
+  onRespond,
+}: {
+  block: Extract<ClaudeBlock, { kind: 'permission' }>;
+  onRespond?: (
+    requestId: string,
+    behavior: 'allow' | 'deny' | 'always-allow',
+  ) => void;
+}): React.ReactElement {
+  const headline =
+    block.title ??
+    `Claude wants to use ${block.toolName}${
+      block.summary ? ` · ${block.summary}` : ''
+    }`;
+  const settled = block.status !== 'pending';
+  const settledLabel =
+    block.status === 'allowed'
+      ? 'allowed'
+      : block.status === 'always-allowed'
+        ? 'always allowed'
+        : block.status === 'denied'
+          ? 'denied'
+          : '';
+  const tsLabel = block.ts
+    ? new Date(block.ts).toTimeString().slice(0, 5)
+    : '';
+  return (
+    <div className={`permission-bubble permission-${block.status}`}>
+      <div className="permission-bubble-head">
+        <i className="codicon codicon-shield" />
+        <span className="permission-bubble-title">{headline}</span>
+        {tsLabel && (
+          <span className="permission-bubble-ts">{tsLabel}</span>
+        )}
+        {settled && (
+          <span className="permission-bubble-state">{settledLabel}</span>
+        )}
+      </div>
+      {block.description && (
+        <div className="permission-bubble-desc">{block.description}</div>
+      )}
+      {block.blockedPath && (
+        <div className="permission-bubble-meta">
+          <span>blocked path:</span>
+          <code>{block.blockedPath}</code>
+        </div>
+      )}
+      {block.decisionReason && (
+        <div className="permission-bubble-meta">
+          <span>reason:</span>
+          <code>{block.decisionReason}</code>
+        </div>
+      )}
+      {block.summary && !block.title && (
+        <div className="permission-bubble-summary">{block.summary}</div>
+      )}
+      {!settled && onRespond && (
+        <div className="permission-bubble-actions">
+          <button
+            type="button"
+            className="permission-btn permission-btn-deny"
+            onClick={() => onRespond(block.requestId, 'deny')}
+          >
+            <i className="codicon codicon-circle-slash" />
+            <span>Deny</span>
+          </button>
+          {block.canAlwaysAllow && (
+            <button
+              type="button"
+              className="permission-btn permission-btn-always"
+              onClick={() => onRespond(block.requestId, 'always-allow')}
+              title="Add an SDK-suggested rule so this tool/input shape doesn't prompt again this session."
+            >
+              <i className="codicon codicon-shield" />
+              <span>Always allow</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="permission-btn permission-btn-allow"
+            onClick={() => onRespond(block.requestId, 'allow')}
+          >
+            <i className="codicon codicon-check" />
+            <span>Allow</span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PromptText({
