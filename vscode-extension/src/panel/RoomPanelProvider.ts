@@ -258,7 +258,16 @@ function roomHtml(webview: vscode.Webview, distRoot: vscode.Uri): string {
     .queue-pill { margin: 4px 10px 0; padding: 4px 10px; font-size: 11px; opacity: 0.85; background: var(--vscode-editorWarning-background, rgba(255,200,0,0.10)); border-left: 2px solid var(--vscode-editorWarning-foreground, var(--vscode-textLink-foreground)); border-radius: 0 3px 3px 0; flex: 0 0 auto; }
 
     /* ========== Claude (agent-style) ========== */
-    .claude-log { flex: 1; min-height: 0; padding: 4px 10px 6px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .claude-log { flex: 1; min-height: 0; padding: 6px 10px 6px 28px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; position: relative; }
+    /* Vertical timeline connector */
+    .claude-log::before { content: ''; position: absolute; left: 13px; top: 10px; bottom: 10px; width: 1px; background: var(--vscode-panel-border); }
+    /* Step wrapper — each block gets a bullet on the timeline */
+    .claude-step { position: relative; }
+    .claude-step::before { content: ''; position: absolute; left: -18px; top: 7px; width: 8px; height: 8px; border-radius: 50%; background: var(--vscode-foreground); opacity: 0.4; z-index: 1; }
+    .claude-step.ok::before { background: var(--vscode-charts-green, #6ec07b); opacity: 0.85; }
+    .claude-step.done::before { background: var(--vscode-charts-green, #6ec07b); opacity: 0.55; }
+    .claude-step.pending::before { background: var(--vscode-disabledForeground, #888); opacity: 0.6; animation: cc-pulse 1.4s ease-in-out infinite; }
+    .claude-step.error::before { background: var(--vscode-errorForeground); opacity: 0.95; }
     .claude-row { word-wrap: break-word; }
     .claude-system { opacity: 0.45; font-size: 11px; padding: 4px 0; }
     .claude-thinking { font-size: 11px; opacity: 0.55; font-style: italic; padding: 4px 0 6px; }

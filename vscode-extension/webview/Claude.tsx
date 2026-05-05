@@ -132,9 +132,11 @@ export function Claude({
   );
 }
 
-/** Walks the block list and inserts a turn separator before each
- *  `session` event after the first one. Each session block marks the
- *  start of a fresh `query()` invocation, i.e. a new @-mention turn. */
+/** Walks the block list and:
+ *  - inserts a turn separator before each `session` event after the
+ *    first one (each session block = a fresh `query()` call)
+ *  - wraps every other block in a `<StepWrap>` that draws the
+ *    vertical timeline + a state-colored bullet. */
 function renderWithTurnSeparators(blocks: ClaudeBlock[]): React.ReactNode[] {
   const out: React.ReactNode[] = [];
   let turn = 0;
@@ -150,9 +152,37 @@ function renderWithTurnSeparators(blocks: ClaudeBlock[]): React.ReactNode[] {
         );
       }
     }
-    out.push(<BlockRow key={i} block={b} />);
+    out.push(
+      <div key={i} className={`claude-step ${stateClassFor(b)}`}>
+        <BlockRow block={b} />
+      </div>,
+    );
   }
   return out;
+}
+
+function stateClassFor(b: ClaudeBlock): string {
+  switch (b.kind) {
+    case 'session':
+      return 'ok';
+    case 'thinking':
+      return b.ongoing ? 'pending' : 'ok';
+    case 'text':
+      return 'ok';
+    case 'tool':
+      if (!b.result) return 'pending';
+      return b.result.isError ? 'error' : 'ok';
+    case 'result':
+      return b.isError ? 'error' : 'done';
+    case 'hook':
+      return b.status === 'pending'
+        ? 'pending'
+        : b.status === 'fail'
+          ? 'error'
+          : 'ok';
+    case 'error':
+      return 'error';
+  }
 }
 
 function BlockRow({ block }: { block: ClaudeBlock }): React.ReactElement | null {
