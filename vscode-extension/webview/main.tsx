@@ -32,8 +32,6 @@ function App(): React.ReactElement {
       const msg = (event.data ?? {}) as { type?: string; body?: unknown };
       if (msg.type === 'host:ready') {
         setStatus('host ready ✓ — tailing log.jsonl');
-      } else if (msg.type === 'echo:reply') {
-        setStatus(`host replied: ${String(msg.body)}`);
       } else if (msg.type === 'room:state') {
         const b = (msg.body ?? {}) as { topic?: string; myNick?: string };
         if (b.topic) setTopic(b.topic);
@@ -57,31 +55,19 @@ function App(): React.ReactElement {
     return () => window.removeEventListener('message', onMsg);
   }, []);
 
-  const onEcho = (): void => {
-    vscode.postMessage({
-      type: 'echo:request',
-      body: `ping at ${new Date().toISOString()}`,
-    });
-  };
-
   const onSend = (body: string): void => {
     vscode.postMessage({ type: 'chat:send', body });
   };
 
   return (
     <React.Fragment>
-      <h1>cc-connect — Room</h1>
       <p className="room-meta">
-        topic: {topic ? `${topic.slice(0, 16)}…` : '(unknown)'} · me: {myNick}
+        topic: {topic ? `${topic.slice(0, 16)}…` : '(unknown)'} · me: {myNick} · {status}
       </p>
       <div className="panes">
         <Chat messages={messages} myNick={myNick} onSend={onSend} />
         <Claude events={claudeEvents} state={claudeState} />
       </div>
-      <p className="actions">
-        <button onClick={onEcho}>Echo to host</button>
-      </p>
-      <p className="status">{status}</p>
     </React.Fragment>
   );
 }

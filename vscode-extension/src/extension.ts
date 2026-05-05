@@ -164,12 +164,7 @@ function openRoomPanelForTopic(
 
   panel.webview.onDidReceiveMessage(
     async (msg: { type?: string; body?: unknown }) => {
-      if (msg.type === 'echo:request') {
-        vscode.window.showInformationMessage(
-          `cc-connect: webview said "${String(msg.body)}"`,
-        );
-        panel.webview.postMessage({ type: 'echo:reply', body: 'pong' });
-      } else if (msg.type === 'chat:send') {
+      if (msg.type === 'chat:send') {
         const body = typeof msg.body === 'string' ? msg.body.trim() : '';
         if (!body) return;
         // Slash-command parse. v0 supports `/drop <path>`. Anything
