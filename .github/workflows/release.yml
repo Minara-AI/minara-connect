@@ -11,8 +11,11 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
-      - "v*.*.*-*"
+      # `v[0-9]*` anchors the leading `v` to a digit, so this matcher
+      # does NOT collide with `vscode-extension-v*` (which would
+      # otherwise match the unanchored `v*.*.*` pattern and double-
+      # trigger this workflow on every extension release).
+      - "v[0-9]*.*.*"
   workflow_dispatch:
     inputs:
       tag:
