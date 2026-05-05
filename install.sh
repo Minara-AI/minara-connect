@@ -64,61 +64,69 @@ case "$(uname -s)" in
 esac
 say "host: $(uname -s) $(uname -m)"
 
-need_rust=0
-if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; then
-  need_rust=1
-fi
-if [[ $need_rust -eq 1 ]]; then
-  warn "rustc / cargo not found."
-  if confirm "Install Rust via rustup?" Y; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-    # rustup writes its env to ~/.cargo/env; pull it into this shell.
-    # shellcheck disable=SC1090,SC1091
-    [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
-  else
-    fail "Rust is required. Install rustc ≥ 1.89 then re-run install.sh."
+if [[ $SKIP_BUILD -eq 0 ]]; then
+  # Source-build path: we need a working Rust toolchain.
+  need_rust=0
+  if ! command -v rustc >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; then
+    need_rust=1
   fi
-fi
+  if [[ $need_rust -eq 1 ]]; then
+    warn "rustc / cargo not found."
+    if confirm "Install Rust via rustup?" Y; then
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      # rustup writes its env to ~/.cargo/env; pull it into this shell.
+      # shellcheck disable=SC1090,SC1091
+      [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env"
+    else
+      fail "Rust is required. Install rustc ≥ 1.89 then re-run install.sh."
+    fi
+  fi
 
-rust_ver="$(rustc --version 2>/dev/null | awk '{print $2}')"
-ok "rustc ${rust_ver}"
+  rust_ver="$(rustc --version 2>/dev/null | awk '{print $2}')"
+  ok "rustc ${rust_ver}"
 
-# MSRV gate. Some iroh-stack deps use `edition = "2024"`, which requires
-# cargo ≥ 1.85. `cargo build` fails opaquely on older toolchains
-# ("feature `edition2024` is required"); compare the version up front and
-# offer to `rustup update` so users don't burn 5 minutes building before
-# the failure.
-required_rust="1.89.0"
-ver_lt() {
-  # Returns 0 (true) when $1 < $2 by semver-ish ordering. Uses sort -V.
-  local a="$1" b="$2"
-  [[ "$a" == "$b" ]] && return 1
-  [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -1)" == "$a" ]]
-}
-if ver_lt "$rust_ver" "$required_rust"; then
-  warn "rustc $rust_ver is older than the required $required_rust (some deps need edition 2024)."
-  if command -v rustup >/dev/null 2>&1; then
-    if confirm "Run \`rustup update stable\` now?" Y; then
-      rustup update stable
-      # Make sure the just-updated toolchain is the active default.
-      rustup default stable >/dev/null 2>&1 || true
-      rust_ver="$(rustc --version 2>/dev/null | awk '{print $2}')"
-      ok "rustc ${rust_ver} (after update)"
-      if ver_lt "$rust_ver" "$required_rust"; then
-        fail "rustc still $rust_ver after update. Manually install a newer toolchain and re-run."
+  # MSRV gate. Some iroh-stack deps use `edition = "2024"`, which requires
+  # cargo ≥ 1.85. `cargo build` fails opaquely on older toolchains
+  # ("feature `edition2024` is required"); compare the version up front and
+  # offer to `rustup update` so users don't burn 5 minutes building before
+  # the failure.
+  required_rust="1.89.0"
+  ver_lt() {
+    # Returns 0 (true) when $1 < $2 by semver-ish ordering. Uses sort -V.
+    local a="$1" b="$2"
+    [[ "$a" == "$b" ]] && return 1
+    [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -1)" == "$a" ]]
+  }
+  if ver_lt "$rust_ver" "$required_rust"; then
+    warn "rustc $rust_ver is older than the required $required_rust (some deps need edition 2024)."
+    if command -v rustup >/dev/null 2>&1; then
+      if confirm "Run \`rustup update stable\` now?" Y; then
+        rustup update stable
+        # Make sure the just-updated toolchain is the active default.
+        rustup default stable >/dev/null 2>&1 || true
+        rust_ver="$(rustc --version 2>/dev/null | awk '{print $2}')"
+        ok "rustc ${rust_ver} (after update)"
+        if ver_lt "$rust_ver" "$required_rust"; then
+          fail "rustc still $rust_ver after update. Manually install a newer toolchain and re-run."
+        fi
+      else
+        fail "Cannot continue with rustc $rust_ver. Run \`rustup update stable\` and re-run install.sh."
       fi
     else
-      fail "Cannot continue with rustc $rust_ver. Run \`rustup update stable\` and re-run install.sh."
+      fail "rustc $rust_ver < $required_rust and rustup is not on PATH. Install Rust via https://rustup.rs and re-run."
     fi
-  else
-    fail "rustc $rust_ver < $required_rust and rustup is not on PATH. Install Rust via https://rustup.rs and re-run."
   fi
-fi
 
-if ! command -v git >/dev/null 2>&1; then
-  fail "git is required (and missing). Install via your package manager / Xcode CLI tools."
+  if ! command -v git >/dev/null 2>&1; then
+    fail "git is required (and missing). Install via your package manager / Xcode CLI tools."
+  fi
+  ok "git $(git --version | awk '{print $3}')"
+else
+  # --skip-build path: we don't need rust / bun / git. Bootstrapped
+  # tarballs land here. Just verify the prebuilt binaries are sitting
+  # in $REPO_ROOT/target/release/.
+  ok "skip-build mode — toolchain checks bypassed"
 fi
-ok "git $(git --version | awk '{print $3}')"
 
 # ---------- 1.5. multiplexer detection ----------------------------------------
 # `cc-connect room start/join` prefers zellij, falls back to tmux, and
@@ -157,28 +165,31 @@ fi
 # chat-ui (Bun + React + Ink) is the right pane of the multiplexer layout.
 # Without bun installed, we skip the chat-ui build and the launcher's
 # multiplexer paths fall back to cc-connect-tui.
-need_chat_ui_build=1
-if ! command -v bun >/dev/null 2>&1; then
-  warn "bun not found — chat-ui (Bun + React + Ink) won't be built."
-  if confirm "Install bun via the official installer (curl https://bun.sh/install | bash)?" Y; then
-    curl -fsSL https://bun.sh/install | bash
-    # bun's installer writes to ~/.bun/bin and updates shell rc; pull it
-    # into THIS shell so the build below sees it.
-    export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
-    export PATH="$BUN_INSTALL/bin:$PATH"
-    if ! command -v bun >/dev/null 2>&1; then
-      warn "bun installed but not on PATH yet. Open a new shell, then re-run:"
-      warn "  ./install.sh --skip-build"
+need_chat_ui_build=0
+if [[ $SKIP_BUILD -eq 0 ]]; then
+  need_chat_ui_build=1
+  if ! command -v bun >/dev/null 2>&1; then
+    warn "bun not found — chat-ui (Bun + React + Ink) won't be built."
+    if confirm "Install bun via the official installer (curl https://bun.sh/install | bash)?" Y; then
+      curl -fsSL https://bun.sh/install | bash
+      # bun's installer writes to ~/.bun/bin and updates shell rc; pull it
+      # into THIS shell so the build below sees it.
+      export BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
+      export PATH="$BUN_INSTALL/bin:$PATH"
+      if ! command -v bun >/dev/null 2>&1; then
+        warn "bun installed but not on PATH yet. Open a new shell, then re-run:"
+        warn "  ./install.sh --skip-build"
+        need_chat_ui_build=0
+      fi
+    else
+      warn "Skipping bun install. The multiplexer launcher will fall back to"
+      warn "cc-connect-tui until you run \`./install.sh\` again with bun on PATH."
       need_chat_ui_build=0
     fi
-  else
-    warn "Skipping bun install. The multiplexer launcher will fall back to"
-    warn "cc-connect-tui until you run \`./install.sh\` again with bun on PATH."
-    need_chat_ui_build=0
   fi
-fi
-if command -v bun >/dev/null 2>&1; then
-  ok "bun $(bun --version)"
+  if command -v bun >/dev/null 2>&1; then
+    ok "bun $(bun --version)"
+  fi
 fi
 
 # ---------- 2. workspace build ------------------------------------------------

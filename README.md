@@ -39,33 +39,43 @@ Full architecture: [`PROTOCOL.md`](./PROTOCOL.md). Decision rationale: [`docs/ad
 
 ## Install
 
-You need: macOS or Linux, Rust ≥ 1.89 (or let the installer install it for you), a working Claude Code install.
+You need: macOS or Linux, a working Claude Code install. **Rust is not required** for the default path — the bootstrap downloads a pre-built binary for your platform.
 
-### One-liner
+### One-liner (recommended — no Rust needed)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Minara-AI/cc-connect/main/scripts/bootstrap.sh | bash
 ```
 
-Clones into `~/cc-connect` (override with `CC_CONNECT_DIR=…`), runs the full installer, prints the next command.
+Detects your platform (macOS arm64 / x86_64, Linux x86_64), pulls the matching tarball from the latest GitHub release, verifies its sha256, then runs the bundled `install.sh --skip-build` to register the `UserPromptSubmit` hook + `cc-connect-mcp` server in `~/.claude/`, symlink binaries into `~/.local/bin/`, and run `cc-connect doctor`. Total time: ~30 seconds on a fast network. Idempotent — safe to re-run.
 
-### Or clone + install yourself
+Pin a specific version (handy for CI):
 
 ```bash
+curl -fsSL <…/bootstrap.sh> | CC_CONNECT_VERSION=v0.1.0 bash
+```
+
+### Build from source (developers / unsupported platforms)
+
+If you want to hack on cc-connect, or your platform isn't in the release matrix (e.g. Linux aarch64, BSD), build from source — needs Rust ≥ 1.89:
+
+```bash
+# One-liner, source mode:
+curl -fsSL <…/bootstrap.sh> | CC_CONNECT_FROM_SOURCE=1 bash
+
+# Or clone + install yourself:
 git clone https://github.com/Minara-AI/cc-connect.git
 cd cc-connect
 ./install.sh
 ```
 
-The script checks the toolchain (offers `rustup` if Rust is missing), runs the release build, backs up `~/.claude/settings.json`, idempotently registers both the `UserPromptSubmit` hook and the `cc-connect-mcp` server, symlinks every binary into `~/.local/bin/`, then runs `cc-connect doctor` to verify. Pass `--yes` for unattended, `--skip-build` to reuse an existing `target/release/`. **Restart Claude Code afterwards** so it picks up the new hook + MCP tools.
+`install.sh` checks the toolchain (offers `rustup` if Rust is missing), builds the workspace, backs up `~/.claude/settings.json`, idempotently registers the hook + MCP server, symlinks every binary, runs `cc-connect doctor`. `--yes` for unattended, `--skip-build` to reuse an existing `target/release/`. First build takes ~5–10 minutes (iroh stack + vendored ed25519).
 
-First build pulls the iroh stack and the patched-vendored `ed25519` / `ed25519-dalek` (see `vendored/`); takes ~5–10 minutes.
+**Restart Claude Code afterwards** (either path) so it picks up the new hook + MCP tools. After install, every command is available as `cc-connect …` from any directory.
 
-After install, every command is available as `cc-connect …` from any directory.
+### Build the VSCode extension
 
-### Build the VSCode extension (recommended)
-
-The default way to use cc-connect is in your editor — see [next section](#use-it-in-vscode-recommended). One extra build step:
+The default way to use cc-connect is in your editor — see [next section](#use-it-in-vscode-recommended).
 
 ```bash
 cd vscode-extension
@@ -75,7 +85,7 @@ bunx @vscode/vsce package
 code --install-extension cc-connect-vscode-0.1.0.vsix
 ```
 
-Or, for development: open `vscode-extension/` in VSCode and press `F5` to launch an Extension Development Host.
+Or, for development: open `vscode-extension/` in VSCode and press `F5` to launch an Extension Development Host. Once the extension is published to the GitHub release, you'll be able to skip the build step entirely and download the `.vsix` directly.
 
 ---
 
@@ -106,7 +116,7 @@ Drag the Room panel to the **secondary side bar** for a vertical Slack-style spl
 
 ### Quick start
 
-1. Click the cc-connect activity-bar icon (left edge).
+1. Click the cc-connect activity-bar icon (left edge). If `~/.local/bin/cc-connect` isn't installed, the Rooms view's welcome message points you to a setup walkthrough — follow it (or run the bootstrap one-liner above) before continuing.
 2. Click **Start Room** in the Rooms tree title bar (or **Join Room** with a peer's ticket).
 3. The Room panel opens; Claude auto-greets the room and starts listening for `@you-cc` mentions.
 4. Click **copy ticket** at the top of the Room panel to share with a peer.
