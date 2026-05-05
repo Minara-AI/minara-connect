@@ -20,7 +20,7 @@ close. This document covers what's missing.
 
 ## Tier 1 — high-impact, small-to-medium effort
 
-### ☐ T1.1 — Step-list timeline with vertical connector
+### ☑ T1.1 — Step-list timeline with vertical connector — `96f1113`
 
 **Pattern observed**: Each Claude turn renders as a vertical timeline.
 A solid line connects step bullets (●), each step is a "thought" / a
@@ -45,7 +45,7 @@ ran Bash, then wrote a reply".
 
 **Effort**: 1–2 hours. Pure CSS + minor JSX wrap.
 
-### ☐ T1.2 — Stop button (interrupt current turn)
+### ☑ T1.2 — Stop button (interrupt current turn) — `ede84cc`
 
 **Pattern observed**: Red square button next to the prompt input.
 Clicking aborts the in-flight turn without closing the pane.
@@ -96,7 +96,7 @@ in-flight query.
 **Effort**: 4–6 hours. The "real prompt" path with inline approval
 bubbles is the bulk of the work.
 
-### ☐ T1.4 — "Queue another message…" placeholder + visible queue depth
+### ☑ T1.4 — "Queue another message…" placeholder + visible queue depth — `ea7441f`
 
 **Pattern observed**: Input placeholder changes to "Queue another
 message…" while Claude is busy. The runner currently *does* queue
@@ -116,7 +116,7 @@ and add a small queue-pill above the input.
 
 **Effort**: 30 minutes.
 
-### ☐ T1.5 — Thinking indicator ("Thought for Xs")
+### ☑ T1.5 — Thinking indicator ("Thought for Xs") — `8c634b1`
 
 **Pattern observed**: Between an assistant prompt and the assistant's
 text reply, a "Thought for Xs" line appears (s = elapsed time before
@@ -137,7 +137,7 @@ sense of *how long* Claude has been thinking on the current step.
 
 ## Tier 2 — medium-impact, medium effort
 
-### ☐ T2.1 — Slash-command launcher (`/` button)
+### ☑ T2.1 — Slash-command launcher (`/` button) — `600ddd8`
 
 **Pattern observed**: A `/` button in the input toolbar opens a
 slash-command picker (autocomplete-style).
@@ -155,7 +155,7 @@ don't have to remember syntax.
 
 **Effort**: 2 hours. Reuse mention popup styling.
 
-### ☐ T2.2 — Attach button (`+`) → file drop dialog
+### ☑ T2.2 — Attach button (`+`) → file drop dialog — `600ddd8`
 
 **Pattern observed**: The `+` button at the input opens a file
 picker.
@@ -192,7 +192,7 @@ want to revisit "what did Claude do last time in this Room".
 **Effort**: 4 hours. Most of the work is the JSONL → SDKMessage
 parser (luckily it's the same shape as live events).
 
-### ☐ T2.4 — "New chat" (`+`) — fork a fresh Claude session
+### ☑ T2.4 — "New chat" — fork a fresh Claude session — `4a7e9dc`
 
 **Pattern observed**: A `+` button creates a new conversation, fresh
 state.
@@ -302,6 +302,24 @@ cc-connect's scope or are already covered:
 - "Open multiple conversations in separate tabs or windows" —
   cc-connect's surface is single-pane; could expose a
   "duplicate Room view" command later
+
+## Progress (2026-05-05 batch)
+
+7 of 13 items shipped this session:
+
+- ☑ T1.1 step timeline · ☑ T1.2 stop · ☑ T1.4 queue pill ·
+  ☑ T1.5 thinking
+- ☑ T2.1 slash · ☑ T2.2 attach · ☑ T2.4 new chat
+
+Remaining (in priority order from below):
+
+- ☐ T1.3 permission UI (deferred — biggest single feature; the
+  inline approval bubble + canUseTool path is non-trivial under
+  the headless ZodError constraint)
+- ☐ T2.3 history · ☐ T2.5 titles (paired — title display only
+  becomes useful once history exists)
+- ☐ T3.1 file-ref chips · ☐ T3.2 IN/OUT layout · ☐ T3.3 already
+  rolled into T1.1
 
 ## Suggested implementation order
 
