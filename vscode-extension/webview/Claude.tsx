@@ -27,7 +27,22 @@ export function Claude({
   onPrompt,
   onInterrupt,
 }: ClaudeProps): React.ReactElement {
-  const blocks = React.useMemo(() => processClaude(events), [events]);
+  // Tick once a second while Claude is busy so the in-flight
+  // "Thinking… Xs" block re-derives its elapsed value via processClaude.
+  const [tick, setTick] = React.useState(0);
+  React.useEffect(() => {
+    if (!state.busy) return;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [state.busy]);
+
+  const blocks = React.useMemo(
+    () => processClaude(events, Date.now()),
+    // Re-run when events change OR when the busy-tick advances so
+    // an ongoing thinking block keeps updating.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [events, tick],
+  );
   // Hide successful hook rows — pending and failed still surface.
   const visible = React.useMemo(
     () => blocks.filter((b) => !(b.kind === 'hook' && b.status === 'ok')),
@@ -165,6 +180,17 @@ function BlockRow({ block }: { block: ClaudeBlock }): React.ReactElement | null 
           {block.status === 'fail' && block.exitCode !== undefined
             ? ` · exit ${block.exitCode}`
             : ''}
+        </div>
+      );
+    }
+    case 'thinking': {
+      const secs = Math.max(1, Math.floor(block.elapsedMs / 1000));
+      const label = block.ongoing
+        ? `Thinking… ${secs}s`
+        : `Thought for ${secs}s`;
+      return (
+        <div className={`claude-row claude-thinking${block.ongoing ? ' ongoing' : ''}`}>
+          {label}
         </div>
       );
     }

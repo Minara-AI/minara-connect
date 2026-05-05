@@ -12,6 +12,7 @@
 export type ClaudeBlock =
   | { kind: 'session'; sessionId: string }
   | { kind: 'hook'; hookId: string; hookName: string; status: 'pending' | 'ok' | 'fail'; exitCode?: number }
+  | { kind: 'thinking'; elapsedMs: number; ongoing: boolean }
   | { kind: 'text'; text: string }
   | {
       kind: 'tool';
@@ -50,7 +51,13 @@ interface RawEvent {
   message?: {
     content?: ContentBlock[] | string;
   };
+  /** Stamped by the webview on arrival — used to derive
+   *  "Thought for Xs" between session start and first content. */
+  _receivedAt?: number;
 }
+
+/** Don't render a thinking block for sub-second turns — too jittery. */
+const THINKING_MIN_MS = 1500;
 
 interface ContentBlock {
   type?: string;
@@ -67,10 +74,31 @@ interface ContentBlock {
 // (full content lives in claude's own transcript JSONL anyway).
 const RESULT_FULL_CAP = 8000;
 
-export function processClaude(events: unknown[]): ClaudeBlock[] {
+export function processClaude(
+  events: unknown[],
+  now: number = Date.now(),
+): ClaudeBlock[] {
   const blocks: ClaudeBlock[] = [];
   const hookIdxById = new Map<string, number>();
   const toolIdxByUseId = new Map<string, number>();
+
+  // Per-turn thinking tracker: when a `system:init` lands we record
+  // its wall-clock arrival; when the first text/tool of that turn
+  // arrives we insert a `thinking` block ahead of it with the gap.
+  // If the turn is still pending at the end of the event list, an
+  // `ongoing: true` thinking block is appended so the UI shows a
+  // live "Thinking… Xs" counter.
+  let turnStartedAt: number | null = null;
+  let turnHasContent = false;
+
+  const maybeInsertThinking = (atTs: number): void => {
+    if (turnStartedAt === null || turnHasContent) return;
+    const elapsed = atTs - turnStartedAt;
+    if (elapsed >= THINKING_MIN_MS) {
+      blocks.push({ kind: 'thinking', elapsedMs: elapsed, ongoing: false });
+    }
+    turnHasContent = true;
+  };
 
   for (const raw of events) {
     const ev = raw as RawEvent;
@@ -78,6 +106,8 @@ export function processClaude(events: unknown[]): ClaudeBlock[] {
     const sub = ev.subtype;
 
     if (t === 'system' && sub === 'init' && ev.session_id) {
+      turnStartedAt = ev._receivedAt ?? now;
+      turnHasContent = false;
       blocks.push({ kind: 'session', sessionId: ev.session_id });
       continue;
     }
@@ -118,6 +148,9 @@ export function processClaude(events: unknown[]): ClaudeBlock[] {
     }
 
     if (t === 'assistant' && Array.isArray(ev.message?.content)) {
+      // First text/tool of this turn → insert thinking block before
+      // the content if the gap is meaningful.
+      maybeInsertThinking(ev._receivedAt ?? now);
       for (const block of ev.message.content) {
         if (block.type === 'text' && typeof block.text === 'string') {
           blocks.push({ kind: 'text', text: block.text });
@@ -166,6 +199,11 @@ export function processClaude(events: unknown[]): ClaudeBlock[] {
     }
 
     if (t === 'result') {
+      // Result implicitly closes the turn; clear thinking state so we
+      // don't try to insert a thinking row for a turn that ended
+      // (e.g. an error result with no text).
+      turnStartedAt = null;
+      turnHasContent = true;
       const isError = !!ev.is_error || (sub !== undefined && sub !== 'success');
       const errorText = isError
         ? (ev.result?.trim() || ev.api_error_status || sub || 'unknown error')
@@ -186,6 +224,16 @@ export function processClaude(events: unknown[]): ClaudeBlock[] {
     }
 
     // Suppress everything else (rate_limit_event, plain user prompts, etc.).
+  }
+
+  // In-flight thinking: turn started, no content yet. Render an
+  // ongoing block at the tail; Claude.tsx ticks `now` so the elapsed
+  // count updates live.
+  if (turnStartedAt !== null && !turnHasContent) {
+    const elapsed = now - turnStartedAt;
+    if (elapsed >= THINKING_MIN_MS) {
+      blocks.push({ kind: 'thinking', elapsedMs: elapsed, ongoing: true });
+    }
   }
 
   return blocks;

@@ -261,6 +261,9 @@ function roomHtml(webview: vscode.Webview, distRoot: vscode.Uri): string {
     .claude-log { flex: 1; min-height: 0; padding: 4px 10px 6px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
     .claude-row { word-wrap: break-word; }
     .claude-system { opacity: 0.45; font-size: 11px; padding: 4px 0; }
+    .claude-thinking { font-size: 11px; opacity: 0.55; font-style: italic; padding: 4px 0 6px; }
+    .claude-thinking.ongoing { animation: cc-pulse 1.4s ease-in-out infinite; }
+    @keyframes cc-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 0.75; } }
     .claude-hook { opacity: 0.35; font-size: 11px; padding-left: 10px; }
     .claude-text { line-height: 1.55; }
     .claude-result { opacity: 0.5; font-size: 11px; padding: 6px 0 8px; border-top: 1px dashed var(--vscode-panel-border); margin-top: 8px; }

@@ -53,7 +53,13 @@ function App(): React.ReactElement {
       } else if (msg.type === 'chat:send-error') {
         setStatus(`send failed: ${String(msg.body)}`);
       } else if (msg.type === 'claude:event') {
-        setClaudeEvents((prev) => [...prev, msg.body]);
+        // Stamp with arrival time so processClaude can compute the
+        // "Thought for Xs" gap between session start and first content.
+        const stamped =
+          msg.body && typeof msg.body === 'object'
+            ? { ...(msg.body as object), _receivedAt: Date.now() }
+            : msg.body;
+        setClaudeEvents((prev) => [...prev, stamped]);
       } else if (msg.type === 'claude:state') {
         const s = msg.body as ClaudeRunnerState;
         setClaudeState({ busy: !!s.busy, queued: s.queued ?? 0 });
