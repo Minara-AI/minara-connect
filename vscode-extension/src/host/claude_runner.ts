@@ -38,6 +38,9 @@ export interface ClaudeRunnerHandle {
   enqueue(prompt: string): void;
   /** Cancel the currently-running turn. Queued items still run. */
   interrupt(): void;
+  /** Mint a fresh Session: drop queue, abort in-flight, rotate the
+   *  sessionId so the next turn starts clean. */
+  resetSession(): void;
   /** Tear the runner down: cancel current + clear queue. Used on
    *  panel dispose. */
   abort(): void;
@@ -46,7 +49,7 @@ export interface ClaudeRunnerHandle {
 export function createClaudeRunner(
   opts: ClaudeRunnerOptions,
 ): ClaudeRunnerHandle {
-  const sessionUuid = randomUUID();
+  let sessionUuid = randomUUID();
   const claudeBin = join(homedir(), '.local', 'bin', 'claude');
   let hasStarted = false;
   const queue: string[] = [];
@@ -122,6 +125,14 @@ export function createClaudeRunner(
       // exits, the finally block clears `processing`, and
       // `processNext` advances to the next queued prompt (if any).
       currentTurnAc?.abort();
+    },
+    resetSession(): void {
+      if (panelClosed) return;
+      queue.length = 0;
+      currentTurnAc?.abort();
+      sessionUuid = randomUUID();
+      hasStarted = false;
+      publishState();
     },
     abort(): void {
       panelClosed = true;

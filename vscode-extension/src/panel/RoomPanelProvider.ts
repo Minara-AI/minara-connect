@@ -112,6 +112,10 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
         } else if (msg.type === 'claude:interrupt') {
           // Cancel the in-flight turn only; queued prompts still run.
           this.runner?.interrupt();
+        } else if (msg.type === 'claude:reset-session') {
+          // Mint a fresh sessionId; the webview clears its local
+          // state in parallel via `room:claude-cleared`.
+          this.runner?.resetSession();
         } else if (msg.type === 'chat:attach') {
           // Open VSCode's native file picker, then drop whatever the
           // user selects into the Room. Cancellation = silent no-op.
@@ -235,7 +239,11 @@ function roomHtml(webview: vscode.Webview, distRoot: vscode.Uri): string {
     .panes { flex: 1; display: grid; grid-template-rows: 1fr 1fr; min-height: 0; gap: 0; }
     .pane { display: flex; flex-direction: column; min-height: 0; border-bottom: 1px solid var(--vscode-panel-border); }
     .pane:last-child { border-bottom: none; }
-    .pane-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 11px; opacity: 0.7; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; flex: 0 0 auto; }
+    .pane-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; flex: 0 0 auto; }
+    .pane-head > span:first-child { flex: 1; }
+    .head-btn { padding: 2px 6px; background: transparent; color: var(--vscode-foreground); opacity: 0.6; border: none; border-radius: 3px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: opacity 0.12s, background 0.12s; }
+    .head-btn:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.15)); }
+    .head-btn svg { display: block; }
     .pane-busy { opacity: 0.7; font-weight: 400; font-size: 10px; text-transform: none; letter-spacing: 0; }
     .muted { font-size: 12px; opacity: 0.55; padding: 8px 10px; }
 

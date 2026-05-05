@@ -85,6 +85,14 @@ function App(): React.ReactElement {
     vscode.postMessage({ type: 'claude:interrupt' });
   };
 
+  const onResetSession = (): void => {
+    // Wipe webview-side state immediately + ask the host to mint a
+    // fresh sessionId. Both effects converge on a clean Claude pane.
+    setClaudeEvents([]);
+    setClaudeState({ busy: false, queued: 0 });
+    vscode.postMessage({ type: 'claude:reset-session' });
+  };
+
   return (
     <React.Fragment>
       <div className="room-meta">
@@ -102,6 +110,7 @@ function App(): React.ReactElement {
           state={claudeState}
           onPrompt={onPrompt}
           onInterrupt={onInterrupt}
+          onResetSession={onResetSession}
         />
       </div>
     </React.Fragment>

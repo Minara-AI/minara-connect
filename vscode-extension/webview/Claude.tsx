@@ -19,6 +19,7 @@ interface ClaudeProps {
   state: ClaudeRunnerState;
   onPrompt?: (body: string) => void;
   onInterrupt?: () => void;
+  onResetSession?: () => void;
 }
 
 export function Claude({
@@ -26,6 +27,7 @@ export function Claude({
   state,
   onPrompt,
   onInterrupt,
+  onResetSession,
 }: ClaudeProps): React.ReactElement {
   // Tick once a second while Claude is busy so the in-flight
   // "Thinking… Xs" block re-derives its elapsed value via processClaude.
@@ -78,7 +80,18 @@ export function Claude({
   return (
     <div className="pane">
       <div className="pane-head">
-        claude {busyLabel && <span className="pane-busy">{busyLabel}</span>}
+        <span>claude {busyLabel && <span className="pane-busy">{busyLabel}</span>}</span>
+        {onResetSession && (
+          <button
+            type="button"
+            className="head-btn"
+            onClick={onResetSession}
+            aria-label="New chat"
+            title="New Claude session — clears history, fresh sessionId"
+          >
+            <NewChatIcon />
+          </button>
+        )}
       </div>
       <div className="claude-log" ref={scrollRef}>
         {visible.length === 0 ? (
@@ -332,6 +345,25 @@ function StopIcon(): React.ReactElement {
       aria-hidden="true"
     >
       <rect x="3" y="3" width="10" height="10" rx="1.5" />
+    </svg>
+  );
+}
+
+function NewChatIcon(): React.ReactElement {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="13"
+      height="13"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2.5 4.5h7M2.5 8h5M2.5 11.5h6" />
+      <path d="M11 9.5v5M8.5 12h5" />
     </svg>
   );
 }
