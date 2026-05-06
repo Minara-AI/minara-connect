@@ -1,8 +1,53 @@
 # VSCode extension — design doc
 
-> Status: draft, pre-scaffold. Captures decisions made before writing code.
-> Sub-decisions (stream-json over PTY; reuse `host-bg` instead of a new
-> daemon) become ADRs once first scaffold validates the assumptions in §9.
+> **Status: v0 shipped (vscode-extension-v0.2.1, 2026-05-05).** This
+> doc captures the decisions made *before* writing code. Sections 1-7
+> are still load-bearing — the implementation honors them. Section 8
+> (open questions) and §9 (pre-scaffold validation) are annotated
+> below to reflect what was resolved during the build-out. For *what
+> the extension does today*, read [`vscode-extension/CLAUDE.md`](../vscode-extension/CLAUDE.md);
+> this doc is the historical "why".
+
+## 0. What shipped
+
+The v0 contract in §4 was implemented end-to-end and ships in
+`vscode-extension-v0.2.1`. Beyond v0, the following polish landed in
+the same release window (2026-05) — none of it changes the §1-§7
+architecture:
+
+- **Permission-mode pill + inline approval bubbles**, deferred per §8
+  ("Permission approvals UI") and resolved with a four-state pill
+  (`auto` / `ask edits` / `plan` / `ask all`) plus inline Allow / Deny
+  / Always-allow buttons backed by SDK `canUseTool`. See
+  [`webview/PermissionBubble.tsx`](../vscode-extension/webview/PermissionBubble.tsx)
+  and [`src/host/claude_runner.ts`](../vscode-extension/src/host/claude_runner.ts).
+- **Setup walkthrough + viewsWelcome state**, resolved per §8
+  ("`cc-connect doctor` integration"). Activation runs
+  [`src/host/binaryVersion.ts::checkCcConnectBinary`](../vscode-extension/src/host/binaryVersion.ts);
+  failure routes the user to a 4-step walkthrough at
+  [`media/walkthrough/`](../vscode-extension/media/walkthrough/).
+- **Conversation history per workspace**, reading
+  `~/.claude/projects/<encoded-cwd>/*.jsonl` directly (see
+  [`src/host/transcripts.ts`](../vscode-extension/src/host/transcripts.ts)).
+- **Launcher-parity prompts** — the extension's Claude runner now
+  feeds the same `bootstrap-prompt.md` + `auto-reply-prompt.md` that
+  the TUI's `claude-wrap.sh` uses, so the embedded Claude knows it's
+  in a Room and auto-greets on join.
+- **Copy-ticket pill** in the room-meta strip (read from the
+  chat-daemon.pid JSON).
+- **IM-style chat layout** (own messages right-aligned with bubbles)
+  + per-tool codicons + IN/OUT-split tool cards.
+
+What's *still* deferred (post-v0):
+- Marketplace publish (Stage B) — needs Azure DevOps PAT + verified
+  publisher; tracked in
+  [`.claude/skills/publish/SKILL.md`](../.claude/skills/publish/SKILL.md).
+- Multi-Room webview — still single-Room per WebviewView. The §8
+  discussion ("multiple editor tabs vs internal tab strip") remains
+  open.
+- TUI-Room collision detection — opening VSCode while a TUI Room is
+  active still spawns a parallel `host-bg` for the topic; the §8
+  question about "attach to existing daemon by topic" is open.
 
 ## 1. Goal
 
@@ -353,30 +398,63 @@ Minimum VSCode API version pinned to whatever ships
 `vscode.window.tabGroups.onDidCloseTab` (≥ 1.74, very old). Locked
 explicitly in the extension `package.json` `engines.vscode`.
 
-## 8. Open questions (deferred)
+## 8. Open questions
 
-- **File drop UX.** Right-click in editor → "Drop to Room" vs
-  chat-panel `/drop` slash command. Likely both; primary picked
-  later.
-- **Permission approvals UI.** Modal vs inline buttons in Claude
-  panel. Both work over stream-json `permission_request`; pick on UX
-  feel.
-- **Multi-Room layout.** One webview per Room (multiple editor tabs)
-  vs single webview with internal tab strip. Likely the former.
-- ~~In-band turn cancellation~~ — resolved by SDK's `q.interrupt()`
-  + `abortController.abort()`; expose as a Cmd-Period analog in the
-  Claude panel during v0 if cheap, else after.
-- **Existing TUI Room collision.** If the user has
+Annotated 2026-05-05 with resolution status. Items marked ✅ shipped;
+☐ remain open; ⏭ deferred with rationale.
+
+- ✅ **File drop UX.** Right-click in editor → "Drop to Room" vs
+  chat-panel `/drop` slash command. **Resolved**: shipped both — the
+  chat pane has a `+` attach button (opens `vscode.window.showOpenDialog`
+  → `ccDrop`) and a `/` slash launcher with `/drop`. No editor-context
+  right-click yet.
+- ✅ **Permission approvals UI.** Modal vs inline buttons. **Resolved
+  inline** — `PermissionBubble.tsx` renders Allow / Deny / Always-allow
+  in the Claude log, gated by a four-state mode pill (`auto` /
+  `ask edits` / `plan` / `ask all`). The SDK's `canUseTool` callback
+  is only attached when the user is in `ask all` mode; the other modes
+  short-circuit at the SDK level (avoids the headless ZodError pitfall
+  noted in [`vscode-extension/CLAUDE.md`](../vscode-extension/CLAUDE.md)).
+- ☐ **Multi-Room layout.** One webview per Room (multiple editor tabs)
+  vs single webview with internal tab strip. **Still open** — v0
+  ships single-Room-per-WebviewView, switching by re-pointing
+  `setRoom(topic)`. The internal-tab approach was deferred when the
+  Rooms tree's "switch by clicking" UX proved sufficient for v0.
+- ✅ ~~In-band turn cancellation~~ — resolved by SDK's `q.interrupt()`
+  + `abortController.abort()`. Shipped as the Stop button (T1.2,
+  commit `ede84cc`).
+- ☐ **Existing TUI Room collision.** If the user has
   `cc-connect room start` running in a TUI and opens VSCode, does
   the extension attach to the existing `host-bg` (by topic), refuse,
-  or spawn a duplicate? `host-bg list` makes attach plausible.
-- **`cc-connect doctor` integration.** Should `doctor` know the
-  extension is installed (so its "all good" output reflects reality)?
-  Probably yes; deferred to first scaffold.
-- **Marketplace publish target.** Marketplace + Open VSX, or
-  ship-from-source first.
+  or spawn a duplicate? **Still open** — current behavior:
+  `chat-daemon start <ticket>` returns `ALREADY <topic> <pid>` so the
+  extension reuses the existing daemon (good); but `host-bg start` is
+  always spawned fresh which can race with a TUI host on the same
+  topic. Tracked as a v0.x cleanup.
+- ✅ **`cc-connect doctor` integration.** Should `doctor` know the
+  extension is installed? **Resolved differently** — instead of
+  `doctor` learning about the extension, the *extension* runs
+  `cc-connect --version` at activate (see
+  [`src/host/binaryVersion.ts`](../vscode-extension/src/host/binaryVersion.ts))
+  and gates Start/Join Room with a friendly "binary too old" toast if
+  the version is below `MIN_CC_CONNECT_VERSION`. Bidirectional
+  awareness wasn't needed for v0; one-way binary→extension version
+  pinning suffices.
+- ⏭ **Marketplace publish target.** Marketplace + Open VSX, or
+  ship-from-source first. **Deferred to Stage B** — `.vsix` is
+  attached to GitHub Release (via
+  [`.github/workflows/vscode-extension-release.yml`](../.github/workflows/vscode-extension-release.yml)).
+  Marketplace publish needs an Azure DevOps PAT + verified publisher;
+  the publish skill's Stage B note documents the wire-up when ready.
 
 ## 9. Validation results
+
+> **Historical** — these tests gated the start of scaffold work in
+> 2026-05-02. They've been overtaken by real shipping behavior, so
+> they aren't a regression suite. Kept for the rationale they
+> captured (in particular the §4.4 PATH-on-macOS-GUI mitigation and
+> the §2 step 6 `transcript_path` adoption). Live behavior is in the
+> codebase + smoke tests, not here.
 
 Tests 1, 2, 4, 6 ran 2026-05-02 against `claude` v2.1.126 +
 `@anthropic-ai/claude-agent-sdk` v0.2.126 on macOS 24.6. Tests 3, 5
