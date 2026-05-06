@@ -32,6 +32,13 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # macos-13 (Apple Intel) hits multi-hour runner queues on the
+    # public GitHub Actions pool. Time-bound the job and let it fail
+    # without blocking the matrix — the release ships with whichever
+    # platforms succeeded; Intel users fall back to
+    # CC_CONNECT_FROM_SOURCE=1 in the meantime.
+    timeout-minutes: 30
+    continue-on-error: ${{ matrix.os == 'macos-13' }}
     strategy:
       fail-fast: false
       matrix:
