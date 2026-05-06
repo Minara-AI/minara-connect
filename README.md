@@ -76,25 +76,41 @@ cd cc-connect
 
 **Restart Claude Code afterwards** (either path) so it picks up the new hook + MCP tools. After install, every command is available as `cc-connect …` from any directory.
 
-### Build the VSCode extension
+### Install the VSCode extension
 
-The default way to use cc-connect is in your editor — see [next section](#use-it-in-vscode-recommended).
+The default way to use cc-connect — see [next section](#use-it-in-vscode-recommended) for what you get.
+
+1. Grab the latest `.vsix` from [GitHub Releases](https://github.com/Minara-AI/cc-connect/releases?q=vscode-extension&expanded=true) (e.g. `cc-connect-vscode-0.2.2.vsix`).
+2. Install:
+   ```bash
+   code --install-extension cc-connect-vscode-0.2.2.vsix
+   ```
+3. **Fully quit Claude Code** (Cmd-Q on macOS, not just close the window) and reopen, so it picks up the new hook + MCP entries the bootstrap installer wrote.
+
+That's it — VSCode's activity bar gets a cc-connect icon. Marketplace publish is on the roadmap; for now `.vsix` is the canonical channel.
+
+#### Developer mode (extension contributors)
+
+Hacking on the extension itself? Open `vscode-extension/` in VSCode and press **F5** for an Extension Development Host (auto-builds + reloads). To package locally:
 
 ```bash
 cd vscode-extension
 bun install
 bun run compile
 bunx @vscode/vsce package
-code --install-extension cc-connect-vscode-0.1.0.vsix
 ```
-
-Or, for development: open `vscode-extension/` in VSCode and press `F5` to launch an Extension Development Host. Once the extension is published to the GitHub release, you'll be able to skip the build step entirely and download the `.vsix` directly.
 
 ---
 
 ## Use it in VSCode (recommended)
 
 The cleanest day-to-day experience is the editor extension. Both halves of cc-connect — the chat substrate and your Claude Code session — live inside one VSCode panel, no terminal multiplexer needed.
+
+**End-to-end in 3 steps**, after you've run the bootstrap installer once on this machine:
+
+1. **Install the extension** — `code --install-extension cc-connect-vscode-X.Y.Z.vsix` (download from [Releases](https://github.com/Minara-AI/cc-connect/releases?q=vscode-extension)).
+2. **Fully quit + reopen Claude Code** so it picks up the new hook + MCP entries.
+3. **Click the cc-connect activity-bar icon** in VSCode → **Start Room** (or **Join Room** with a peer's ticket). The first time, a 4-step walkthrough auto-opens to verify your setup.
 
 ```
 ┌─ Activity Bar ────────────────────────────────────────────┐
@@ -117,12 +133,16 @@ The cleanest day-to-day experience is the editor extension. Both halves of cc-co
 
 Drag the Room panel to the **secondary side bar** for a vertical Slack-style split next to your editor.
 
-### Quick start
+### First Room
 
-1. Click the cc-connect activity-bar icon (left edge). If `~/.local/bin/cc-connect` isn't installed, the Rooms view's welcome message points you to a setup walkthrough — follow it (or run the bootstrap one-liner above) before continuing.
-2. Click **Start Room** in the Rooms tree title bar (or **Join Room** with a peer's ticket).
-3. The Room panel opens; Claude auto-greets the room and starts listening for `@you-cc` mentions.
-4. Click **copy ticket** at the top of the Room panel to share with a peer.
+After the 3-step install above:
+
+1. **Start a Room** (you become host) — click the **+** in the Rooms tree title bar. Your `cc1-…` ticket is auto-copied to your clipboard. Share it however you normally share text.
+2. **Or Join** a peer's Room — click the cloud-download icon, paste the `cc1-…` ticket they sent you.
+3. The Room panel opens at the bottom of VSCode. Claude auto-greets the room (`o/ joined.`) and starts listening for `@you-cc` mentions.
+4. Click **copy ticket** in the room-meta strip any time to re-share.
+
+If the Rooms view ever says "binary not found", the cc-connect CLI got upgraded out from under you — re-run the bootstrap one-liner.
 
 ### What's in the Room panel
 
