@@ -47,8 +47,12 @@ detect_target() {
   arch=$(uname -m)
   case "$os/$arch" in
     Darwin/arm64)        echo aarch64-apple-darwin ;;
-    Darwin/x86_64)       echo x86_64-apple-darwin ;;
     Linux/x86_64)        echo x86_64-unknown-linux-gnu ;;
+    Darwin/x86_64)
+      # Apple Intel was dropped from release.yml's build matrix
+      # (GitHub's public macos-13 runner pool sustains multi-hour
+      # queues for tagged releases). Intel Macs build from source.
+      die "no pre-built tarball for Apple Intel (x86_64-apple-darwin). Set CC_CONNECT_FROM_SOURCE=1 to build from source — needs Rust ≥ 1.89." ;;
     Linux/aarch64)
       # Pre-built linux-aarch64 isn't currently in release.yml's
       # build matrix. Fall through to source build with a clear

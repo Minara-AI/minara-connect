@@ -32,13 +32,7 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    # macos-13 (Apple Intel) hits multi-hour runner queues on the
-    # public GitHub Actions pool. Time-bound the job and let it fail
-    # without blocking the matrix — the release ships with whichever
-    # platforms succeeded; Intel users fall back to
-    # CC_CONNECT_FROM_SOURCE=1 in the meantime.
     timeout-minutes: 30
-    continue-on-error: ${{ matrix.os == 'macos-13' }}
     strategy:
       fail-fast: false
       matrix:
@@ -49,9 +43,14 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            archive: tar.gz
+          # macos-13 (Apple Intel x86_64) was dropped 2026-05-06:
+          # GitHub's public macos-13 runner pool sustains multi-hour
+          # queues for tagged releases that consistently blocked the
+          # release job. Apple Intel ≤ 2020 is rare enough among
+          # cc-connect's audience that requiring those users to set
+          # CC_CONNECT_FROM_SOURCE=1 in bootstrap.sh is a worthwhile
+          # tradeoff. If Apple Intel runner availability recovers (or
+          # we run a self-hosted Intel mac), re-add the matrix entry.
     steps:
       - uses: actions/checkout@v4
         with:
