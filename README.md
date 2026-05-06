@@ -1,8 +1,11 @@
 # cc-connect
 
-A peer-to-peer protocol that lets multiple Claude Code instances share the same chat-and-files context. Each developer keeps their own Claude. The shared substrate (chat history, files) lives over P2P (`iroh-gossip`); each Claude reads from its local replica via a `UserPromptSubmit` hook.
+**Multiplex shared context across Claudes — not one Claude across humans.**
 
-The big idea: don't multiplex one Claude across humans, multiplex shared context across Claudes.
+A peer-to-peer substrate that lets multiple Claude Code instances share the same chat history and dropped files. Each developer keeps their own Claude. The shared layer rides on `iroh-gossip`; each Claude reads its local replica via a `UserPromptSubmit` hook. Both halves of the experience ship as one project:
+
+- **VSCode extension** (recommended) — Rooms tree + chat/Claude panel inside your editor.
+- **TUI** — `cc-connect room start` for terminal users; same Tickets, same hook injection.
 
 > v0.1 status: feature-complete in commits, full protocol drafted in [`PROTOCOL.md`](./PROTOCOL.md). Vendored ed25519 patches block crates.io publish until upstream releases an `ed25519-dalek` against fixed `pkcs8` (see [`TODOS.md`](./TODOS.md)).
 
@@ -153,19 +156,14 @@ The extension is **purely TypeScript** — no native code, no extra runtime deps
 
 ## Or via the terminal (TUI alternative)
 
-The TUI experience is unchanged — same Room model, same Tickets, same hook injection. Pick whichever you prefer; mix freely between machines. Two commands cover everything:
+The TUI is the same Room model and same Tickets — pick whichever you prefer, mix freely between machines. Two commands cover everything:
 
 ```bash
-# Start a brand-new room. Spawns a background host daemon, opens the TUI.
-cc-connect room start
-
-# Join an existing room by ticket. Same TUI experience.
-cc-connect room join cc1-…
+cc-connect room start            # mint a new Room → opens the TUI
+cc-connect room join cc1-…       # join an existing Room by ticket
 ```
 
-That's it. Everything else (the host daemon, the chat substrate, the MCP server) is started for you and torn down when you `Ctrl-Q` (host daemons stay alive in the background so peers can still join via your ticket — close them with `cc-connect clear`).
-
-### What `room start` shows you
+The host daemon, chat substrate, and MCP server are spawned + torn down for you. `Ctrl-Q` quits without stopping host daemons — that way peers can still join while you're not looking. Use `cc-connect clear` to stop them later.
 
 ```
 ┌─ cc-connect [1-9] tab [Ctrl-N] new [Ctrl-W] close [F2/Tab] pane [Ctrl-Y] copy ─┐
@@ -181,59 +179,78 @@ That's it. Everything else (the host daemon, the chat substrate, the MCP server)
 
 | Key            | Action |
 |---             |---     |
-| `1`–`9`        | Switch to tab N |
-| `Ctrl-N`       | Open new tab → `j` to paste a ticket and join |
-| `Ctrl-W`       | Close active tab. If you started the host daemon for it, prompts whether to also stop the daemon |
-| `F2` / `Tab`   | Switch focus between chat and claude panes |
-| `Ctrl-Y`       | Copy the active tab's ticket to your system clipboard |
-| `PgUp/PgDn`    | Scroll the focused pane (or use trackpad / mouse wheel) |
-| `Ctrl-Q`       | Quit (closes all tabs; keeps host daemons alive) |
+| `1`–`9`        | Switch tab |
+| `Ctrl-N`       | New tab → paste a ticket to join |
+| `Ctrl-W`       | Close tab (if you started the host daemon, prompts to also stop it) |
+| `F2` / `Tab`   | Toggle focus between chat and Claude panes |
+| `Ctrl-Y`       | Copy the active tab's ticket to clipboard |
+| `Ctrl-Q`       | Quit; host daemons stay alive |
 
-The `·H` suffix on a tab label means you started a `host-bg` daemon for that room. Close the tab without stopping the daemon and the room stays joinable for your peers.
+`·H` on a tab label means you originated the Room (host-bg daemon is yours). Close the tab without stopping the daemon and the Room stays joinable for peers.
 
-### Optional: configure your displayed name
+---
 
-```bash
-cc-connect room start --nick alice          # persists to ~/.cc-connect/config.json
-```
+## Configuration
 
-Or skip the flag and the first run will prompt you for one.
+These knobs apply to **both** VSCode and TUI paths (the extension shells out to the same `cc-connect` binary).
 
-### Optional: prefer a multiplexer
-
-The TUI is the default, but if you have `zellij` or `tmux` installed you can opt in to a multiplexer-managed layout (left pane: claude, right pane: a richer Bun + React + Ink chat panel):
+### Pick a nickname
 
 ```bash
-CC_CONNECT_MULTIPLEXER=zellij cc-connect room start
-CC_CONNECT_MULTIPLEXER=tmux   cc-connect room start
-CC_CONNECT_MULTIPLEXER=auto   cc-connect room start   # zellij → tmux → embedded TUI
+cc-connect room start --nick alice         # persists to ~/.cc-connect/config.json
 ```
 
-Same exit hint: `Ctrl-q + y` (zellij), `Ctrl-b + d` (tmux detach), or `Ctrl-Q` (embedded TUI).
+Skip the flag and the first run prompts you. The nick is local-only — peers see the Pubkey of your machine plus whichever nick *you* sent in your last message.
 
-### Optional: self-hosted relay
+### Use your own relay (optional)
 
-By default cc-connect routes through n0's free public relay cluster (used by every iroh deployment). To run through your own server:
+By default cc-connect routes through n0's free public relay cluster (the same iroh deployment everyone uses). For your own:
 
 ```bash
 cc-connect room start --relay https://relay.yourdomain.com
 ```
 
-The host's `--relay` URL is baked into the printed ticket, so joiners pick it up automatically — they only need to pass `--relay` themselves to override. Stand-up instructions: [`.claude/skills/cc-connect-relay-setup/SKILL.md`](.claude/skills/cc-connect-relay-setup/SKILL.md).
+The host's `--relay` URL is baked into the printed Ticket so joiners pick it up automatically. Stand-up walkthrough: [`.claude/skills/cc-connect-relay-setup/SKILL.md`](.claude/skills/cc-connect-relay-setup/SKILL.md).
+
+### Multiplexer mode (TUI only)
+
+The embedded TUI is the default. If you have `zellij` or `tmux` installed, you can opt in to a multiplexer-managed layout that uses the richer Bun + React + Ink chat panel (`cc-chat-ui`) on the right:
+
+```bash
+CC_CONNECT_MULTIPLEXER=zellij cc-connect room start
+CC_CONNECT_MULTIPLEXER=tmux   cc-connect room start
+CC_CONNECT_MULTIPLEXER=auto   cc-connect room start    # zellij → tmux → embedded
+```
+
+Exit hint: `Ctrl-q + y` (zellij), `Ctrl-b + d` (tmux detach), `Ctrl-Q` (embedded).
+
+### Pin a binary version
+
+For reproducible installs (CI, second machines, demo setups) pin the bootstrap to a specific release tag:
+
+```bash
+curl -fsSL <…/bootstrap.sh> | CC_CONNECT_VERSION=v0.5.0-alpha bash
+```
 
 ---
 
-## Two-laptop demo procedure
+## Two-laptop demo
 
-For the real magic-moment test:
+The real magic-moment test. Works the same in VSCode or the TUI — pick whichever side you're on.
 
-1. Both machines: install (above), then restart Claude Code.
-2. Alice: `cc-connect room start` — copy the printed `cc1-…` ticket.
-3. Bob: `cc-connect room join 'cc1-…'`.
+1. **Both machines**: install cc-connect (no-Rust one-liner above), then restart Claude Code.
+2. **Alice (host)**:
+   - VSCode: click the cc-connect activity-bar icon → **Start Room** → click **copy ticket**.
+   - TUI: `cc-connect room start` (the `cc1-…` ticket is auto-copied to clipboard).
+3. **Bob (joiner)**: paste Alice's ticket.
+   - VSCode: **Join Room** → paste.
+   - TUI: `cc-connect room join 'cc1-…'`.
 4. **Bob types into his chat pane**: `try sqlite for now`.
-5. **Alice asks her Claude something** in the left pane (anything). On submit, the hook reads Bob's message from Alice's local log and injects it as context. Alice's Claude reply should reference Bob's suggestion.
+5. **Alice asks her Claude anything** in her Claude pane. On submit, the hook reads Bob's message from Alice's local replica and injects it as context. Alice's Claude reply should reference Bob's suggestion.
 
-If it doesn't work, see [Troubleshooting](#troubleshooting).
+That's the magic moment: Bob never @-mentioned Alice, Alice never copy-pasted anything. The substrate did the work.
+
+If it doesn't fire, see [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -254,7 +271,7 @@ Inside the chat pane:
 
 ## Letting Claude talk back (MCP tools)
 
-The TUI starts the `cc-connect-mcp` server the first time you run it. The embedded Claude gets seven tools:
+`cc-connect-mcp` is registered as a Claude Code MCP server at install time, so any Claude Code session — TUI, VSCode extension, or the CLI elsewhere — sees the same seven tools (the cc-connect-hook gates them on `CC_CONNECT_ROOM` so they're only visible inside a Room):
 
 | Tool                      | What it does |
 |---                        |---           |
@@ -266,7 +283,7 @@ The TUI starts the `cc-connect-mcp` server the first time you run it. The embedd
 | `cc_save_summary`         | Overwrite this room's rolling summary (auto-injected on every prompt) |
 | `cc_wait_for_mention`     | Block until someone @-mentions this Claude (or a timeout) |
 
-Try it: in a TUI claude pane, ask "send '@all standup in 5' to the room". Claude calls `cc_at` and the message lands in everyone's chat scrollback.
+Try it: ask Claude (VSCode pane or TUI claude pane), `"send '@all standup in 5' to the room"`. Claude calls `cc_at` and the message lands in every peer's chat scrollback.
 
 ---
 
@@ -335,26 +352,31 @@ If `cc-connect-hook` fired but you suspect it failed, check `~/.cc-connect/hook.
 
 ```
 cc-connect/
-├── PROTOCOL.md              v0.1 wire-and-disk specification
-├── CONTEXT.md               Domain glossary (DDD-style)
-├── SECURITY.md              Threat model
-├── CLAUDE.md                Agent guide for Claude Code sessions in this repo
+├── PROTOCOL.md                  v0.1 wire-and-disk specification
+├── CONTEXT.md                   Domain glossary (DDD-style)
+├── SECURITY.md                  Threat model
+├── CLAUDE.md                    Agent guide for Claude Code sessions in this repo
+├── crates/                      Rust workspace (5 crates)
+│   ├── cc-connect-core/         Protocol primitives library (104 tests)
+│   ├── cc-connect/              host / chat / room / host-bg / chat-daemon / lifecycle / doctor / setup binary
+│   ├── cc-connect-tui/          Embedded TUI binary + library
+│   ├── cc-connect-mcp/          MCP stdio server (Claude Code → chat tools)
+│   └── cc-connect-hook/         UserPromptSubmit hook binary
+├── chat-ui/                     Bun + React + Ink chat panel (→ cc-chat-ui), used in zellij/tmux paths
+├── vscode-extension/            VSCode extension (TS + React webview, no native code)
+│   ├── src/                     Extension host (sidebar, panel, daemon orchestration, Claude SDK runner)
+│   ├── webview/                 React app (chat, Claude pane, tool cards, permission bubbles)
+│   └── media/walkthrough/       First-run setup walkthrough markdown
+├── layouts/                     zellij KDL + tmux script + claude-wrap.sh + bootstrap/auto-reply prompts
 ├── docs/
-│   ├── adr/                 Architecture decision records
-│   └── agents/              Per-repo config the engineering skills consume
-├── crates/
-│   ├── cc-connect-core/     Protocol primitives library (104 tests)
-│   ├── cc-connect/          host / chat / room / host-bg / chat-daemon / lifecycle / doctor binary
-│   ├── cc-connect-tui/      Embedded TUI binary + library
-│   ├── cc-connect-mcp/      MCP stdio server (Claude Code → chat tools)
-│   └── cc-connect-hook/     UserPromptSubmit hook binary
-├── chat-ui/                 Bun + React + Ink chat panel (→ cc-chat-ui), used in zellij/tmux paths
-├── layouts/                 zellij KDL + tmux script + claude-wrap.sh + prompt files
-├── .claude/skills/          Project-local Claude Code skills
-├── .githooks/               Polyglot pre-commit + commit-msg hooks
-├── scripts/                 install / smoke-test / repo-config helpers
-├── tests/                   FAKE-CLAUDE-CODE integration test
-└── vendored/                Patched ed25519 + ed25519-dalek (temporary)
+│   ├── adr/                     Architecture decision records
+│   └── agents/                  Per-repo config the engineering skills consume
+├── .github/workflows/           CI — release.yml (Rust binaries), vscode-extension-release.yml (.vsix), ci.yml (per-PR)
+├── .claude/skills/              Project-local Claude Code skills (publish, push, cc-connect-setup, …)
+├── .githooks/                   Polyglot pre-commit + commit-msg hooks
+├── scripts/                     bootstrap.sh + smoke tests + repo-config helpers
+├── tests/                       FAKE-CLAUDE-CODE integration test
+└── vendored/                    Patched ed25519 + ed25519-dalek (temporary; see TODOS.md)
 ```
 
 ---
