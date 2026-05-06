@@ -42,6 +42,8 @@ Read these before tagging. Each has burned at least one release.
 
 6. **Tarball must contain all five binaries.** `install.sh` hard-fails when `cc-connect-mcp` is missing; warns when `cc-connect-tui` is missing. Both must be in the `cp` loop in `release.yml::Package` step.
 
+7. **Rust release matrix is 2 platforms, not 3.** As of v0.5.0 the matrix is `aarch64-apple-darwin` (Apple Silicon) + `x86_64-unknown-linux-gnu`. `x86_64-apple-darwin` (Apple Intel / macos-13) was dropped because GitHub's public macos-13 runner pool sustains multi-hour queues for tagged release runs. Apple Intel users use `CC_CONNECT_FROM_SOURCE=1` in `bootstrap.sh`. **`timeout-minutes` does NOT solve the queue stall** — it counts wall-clock *after* the job picks up, not queue time. If you see a build job stuck queued for 30+ minutes with no runner, cancel and inspect runner availability rather than waiting. Re-add Intel to the matrix only if the public queue recovers (or we self-host).
+
 ## Step-by-step: VSCode extension release
 
 ```bash
@@ -96,7 +98,7 @@ git tag -a vX.Y.Z[-alpha] -m "vX.Y.Z[-alpha] — <one-line summary>
 <3-6 line bullets covering protocol/CLI/install changes>"
 git push origin vX.Y.Z[-alpha]
 
-# 5. Watch CI (≈10-15 min — three-platform Rust workspace build)
+# 5. Watch CI (≈6-8 min — two-platform Rust workspace build)
 gh run watch --exit-status            # release.yml takes the longest
 
 # 6. Verify three tarballs + their .sha256 siblings landed
@@ -111,7 +113,7 @@ Always do **Rust first**, then VSCode extension. The extension's behavior may de
 # 1. Cut Rust release, wait for CI green
 git tag -a v0.6.0-alpha -m "..."
 git push origin v0.6.0-alpha
-gh run watch --exit-status                # ~10-15 min
+gh run watch --exit-status                # ~6-8 min (2 platforms)
 
 # 2. (Optional but recommended) Smoke-test the new tarball:
 curl -fsSL https://raw.githubusercontent.com/Minara-AI/cc-connect/main/scripts/bootstrap.sh \
@@ -158,6 +160,7 @@ If CI fails:
 
 - **`vscode-extension-release.yml`** validation: tag and `package.json::version` disagree. Bump the file, amend the bump commit, force-push (only main has the bump; the tag points at the *same* commit you'd amend, so `git tag -f vscode-extension-vX.Y.Z` after the amend then `git push origin vscode-extension-vX.Y.Z --force`).
 - **`release.yml`** Rust build failure: usually a flake or a real compile error on a less-tested platform. `gh run rerun <id>` for flakes; otherwise fix locally and re-tag with the next patch version (don't force-move release tags — users may have already downloaded the artifacts).
+- **`release.yml`** stuck-queued for hours: GitHub public-runner pool starvation (we hit this on macos-13 in 2026-05). Symptoms: matrix entry shows no checkmark and no log output; `gh run view <id>` reports the job as still queued well past the timeout-minutes value. `timeout-minutes` does NOT help — it's a runtime budget that only applies *after* the job picks up. Recovery: cancel the run, drop or skip the affected runner from the matrix in `release.yml`, push the workflow change, then `gh workflow run release.yml -f tag=vX.Y.Z` to re-trigger using the patched workflow against the existing tag.
 
 ## Stage B (deferred)
 
