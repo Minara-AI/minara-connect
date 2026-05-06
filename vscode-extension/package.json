@@ -81,6 +81,18 @@
         "icon": "$(stop)"
       },
       {
+        "command": "cc-connect.deleteRoom",
+        "title": "Delete Room…",
+        "category": "cc-connect",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "cc-connect.setNickname",
+        "title": "Set Nickname…",
+        "category": "cc-connect",
+        "icon": "$(person)"
+      },
+      {
         "command": "cc-connect.refreshRooms",
         "title": "Refresh",
         "category": "cc-connect",
@@ -176,6 +188,11 @@
           "command": "cc-connect.refreshRooms",
           "when": "view == cc-connect.rooms",
           "group": "navigation@3"
+        },
+        {
+          "command": "cc-connect.setNickname",
+          "when": "view == cc-connect.rooms",
+          "group": "1_config@1"
         }
       ],
       "view/item/context": [
@@ -190,6 +207,11 @@
           "group": "inline@2"
         },
         {
+          "command": "cc-connect.deleteRoom",
+          "when": "view == cc-connect.rooms && viewItem == room.dormant",
+          "group": "inline@1"
+        },
+        {
           "command": "cc-connect.openRoom",
           "when": "view == cc-connect.rooms",
           "group": "1_open"
@@ -202,6 +224,11 @@
         {
           "command": "cc-connect.stopRoom",
           "when": "view == cc-connect.rooms && viewItem == room.alive",
+          "group": "3_destructive"
+        },
+        {
+          "command": "cc-connect.deleteRoom",
+          "when": "view == cc-connect.rooms && viewItem == room.dormant",
           "group": "3_destructive"
         }
       ]
