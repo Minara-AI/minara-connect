@@ -2,7 +2,7 @@
   "name": "cc-connect-vscode",
   "displayName": "cc-connect",
   "description": "Peer-to-peer chat substrate for shared Claude Code context",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "publisher": "minara",
   "private": true,
   "license": "MIT OR Apache-2.0",
