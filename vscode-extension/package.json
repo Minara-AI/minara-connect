@@ -2,7 +2,7 @@
   "name": "cc-connect-vscode",
   "displayName": "cc-connect",
   "description": "Peer-to-peer chat substrate for shared Claude Code context",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "minara",
   "private": true,
   "license": "MIT OR Apache-2.0",
@@ -15,7 +15,7 @@
     "vscode": "^1.74.0"
   },
   "categories": ["Other"],
-  "main": "./out/extension.js",
+  "main": "./dist/extension.js",
   "activationEvents": [
     "onView:cc-connect.rooms"
   ],
@@ -208,10 +208,11 @@
     }
   },
   "scripts": {
-    "compile": "bun run compile:host && bun run compile:webview",
-    "compile:host": "tsc -p . && mkdir -p dist/layouts && cp ../layouts/bootstrap-prompt.md ../layouts/auto-reply-prompt.md dist/layouts/",
+    "compile": "bun run typecheck && bun run compile:host && bun run compile:webview",
+    "compile:host": "bun build ./src/extension.ts --target=node --external=vscode --outdir=./dist --format=cjs && mkdir -p dist/layouts && cp ../layouts/bootstrap-prompt.md ../layouts/auto-reply-prompt.md dist/layouts/",
     "compile:webview": "bun build ./webview/main.tsx --outdir ./dist/webview --format esm --target browser --jsx-factory React.createElement --jsx-fragment React.Fragment --sourcemap=external && cp node_modules/@vscode/codicons/dist/codicon.css node_modules/@vscode/codicons/dist/codicon.ttf dist/webview/",
-    "watch": "tsc -p . --watch",
+    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.webview.json",
+    "watch": "bun build ./src/extension.ts --target=node --external=vscode --outdir=./dist --format=cjs --watch",
     "vscode:prepublish": "bun run compile",
     "probe:sdk": "bun run scripts/probe-sdk.ts"
   },
