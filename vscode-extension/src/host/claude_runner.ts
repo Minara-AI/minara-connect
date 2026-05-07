@@ -93,6 +93,16 @@ export interface ClaudeRunnerOptions {
    *  Room and enters the `cc_wait_for_mention` loop without the user
    *  having to type anything. */
   initialPrompt?: string;
+  /** Persisted sessionId for this Room from a prior panel lifecycle.
+   *  When set, the runner skips the auto-greet and uses `resume:` on
+   *  the first turn so the conversation continues where it left off
+   *  — rejoining a Room shouldn't re-broadcast hello. */
+  resumeSessionId?: string;
+  /** Notifies the panel of the runner's active sessionId so it can
+   *  persist for next-rejoin resume. Fires once at construction
+   *  (with the resumed or freshly-minted UUID) and again whenever
+   *  `resetSession()` rotates it. */
+  onSessionId?: (sessionId: string) => void;
   onEvent: (event: unknown) => void;
   onStateChange: (state: ClaudeRunnerState) => void;
 }
@@ -125,9 +135,13 @@ export interface ClaudeRunnerHandle {
 export function createClaudeRunner(
   opts: ClaudeRunnerOptions,
 ): ClaudeRunnerHandle {
-  let sessionUuid = randomUUID();
+  // Resume a prior Session when the panel was reopened on the same
+  // Room — `hasStarted` flips so the first turn uses `resume:` instead
+  // of `sessionId:`, matching the post-first-turn path inside runOne.
+  const resuming = !!opts.resumeSessionId;
+  let sessionUuid = opts.resumeSessionId || randomUUID();
   const claudeBin = join(homedir(), '.local', 'bin', 'claude');
-  let hasStarted = false;
+  let hasStarted = resuming;
   const queue: string[] = [];
   let processing = false;
   let panelClosed = false;
@@ -248,13 +262,27 @@ export function createClaudeRunner(
   // `resetSession()` — that would re-broadcast a greeting to peers
   // every time the user clicks New chat, which is noisy.
   //
+  // Same logic applies on resume: rejoining the Room should not
+  // re-broadcast hello. The persisted Session continues silently and
+  // wakes on the next @-mention or user prompt.
+  //
   // `bootstrapPrompt` (when truthy) is the *one* turn that must
   // always run with bypassPermissions: the user didn't initiate it,
   // so popping a permission bubble for the auto-greet's `cc_send`
   // would be a confusing first-run UX. runOne checks identity to
   // decide whether to honor `currentMode` or force-bypass.
-  const bootstrapPrompt = opts.initialPrompt?.trim() || '';
+  const bootstrapPrompt = resuming ? '' : (opts.initialPrompt?.trim() || '');
   if (bootstrapPrompt) queue.push(bootstrapPrompt);
+
+  // Hand the panel the sessionId we'll be using so it can persist for
+  // next rejoin. Fires before any turn runs — even a runner that's
+  // aborted before its first enqueue should leave a usable resume
+  // pointer behind.
+  try {
+    opts.onSessionId?.(sessionUuid);
+  } catch {
+    /* swallow — best-effort persistence */
+  }
 
   function publishState(): void {
     opts.onStateChange({
@@ -456,6 +484,11 @@ export function createClaudeRunner(
       denyAllPending('session reset');
       sessionUuid = randomUUID();
       hasStarted = false;
+      try {
+        opts.onSessionId?.(sessionUuid);
+      } catch {
+        /* swallow */
+      }
       publishState();
     },
     abort(): void {

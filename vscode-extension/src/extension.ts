@@ -85,6 +85,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider(
       RoomPanelProvider.viewType,
       roomPanelProvider,
+      // Keep the webview alive when another sidebar/panel view takes
+      // focus. Without this, VSCode disposes the webview on hide:
+      // React state is lost, the runner is aborted, and the auto-greet
+      // re-broadcasts to peers when the panel comes back. Memory cost
+      // is one chat scrollback per Room, well under the budget.
+      { webviewOptions: { retainContextWhenHidden: true } },
     ),
     vscode.commands.registerCommand('cc-connect.hello', () => {
       vscode.window.showInformationMessage('cc-connect: hello');

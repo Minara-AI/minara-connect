@@ -315,15 +315,27 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
     const launcherPrompts = loadLauncherPrompts(
       this.context.extensionUri.fsPath,
     );
+    // Resume the prior Session for this Room if we have one stored.
+    // Persisted via globalState (per-machine, survives VSCode reloads
+    // and panel close/reopen). Cleanup goes with the extension itself
+    // — uninstalling the .vsix wipes globalState, so no extra entry
+    // for the lifecycle.rs cleanup contract.
+    const sessionKey = sessionStateKey(topic);
+    const resumeSessionId = this.context.globalState.get<string>(sessionKey);
     this.runner = createClaudeRunner({
       topic,
       // Same prompt pair the TUI feeds claude via `claude-wrap.sh`:
       // - autoReply → `--append-system-prompt` (Claude learns it's
       //   in a cc-connect Room, learns the cc_* MCP tools)
       // - bootstrap → first user prompt (Claude greets + enters the
-      //   `cc_wait_for_mention` listener loop)
+      //   `cc_wait_for_mention` listener loop). Suppressed inside the
+      //   runner when resuming.
       systemPromptAppend: launcherPrompts.autoReply,
       initialPrompt: launcherPrompts.bootstrap,
+      resumeSessionId,
+      onSessionId: (sid) => {
+        void this.context.globalState.update(sessionKey, sid);
+      },
       onEvent: (event) =>
         view.webview.postMessage({ type: 'claude:event', body: event }),
       onStateChange: (state) =>
@@ -358,6 +370,13 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
 
     view.webview.postMessage({ type: 'host:ready' });
   }
+}
+
+/** globalState key for the most-recent Claude sessionId we used in
+ *  this Room. Per-topic so different Rooms don't trample each other.
+ *  Lives in VSCode's storage, so cleanup goes with the extension. */
+function sessionStateKey(topic: string): string {
+  return `cc-connect.session.${topic}`;
 }
 
 function readMyNick(): string | undefined {
