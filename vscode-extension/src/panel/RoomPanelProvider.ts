@@ -15,7 +15,7 @@ import {
   createClaudeRunner,
   type ClaudeRunnerHandle,
 } from '../host/claude_runner';
-import { ccDrop, ccSend } from '../host/ipc';
+import { ccAtAi, ccDrop, ccSend, ccSendAi } from '../host/ipc';
 import { tailLog, type LogTailHandle } from '../host/log_tail';
 import { shouldWakeClaude } from '../host/mention';
 import { loadLauncherPrompts } from '../host/prompts';
@@ -322,6 +322,33 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
     // for the lifecycle.rs cleanup contract.
     const sessionKey = sessionStateKey(topic);
     const resumeSessionId = this.context.globalState.get<string>(sessionKey);
+    // Tracks how many permission bubbles are awaiting user click. We
+    // broadcast a single "@<owner> 我正在等待授权" notice on the 0→1
+    // transition so peers who @-mentioned this Claude know the answer
+    // is gated on a local approval, not on Claude's thinking. Reset
+    // back to 0 when every bubble resolves so a later request fires
+    // the notice again.
+    let pendingPermissionCount = 0;
+    const onClaudeEvent = (event: unknown): void => {
+      if (event && typeof event === 'object') {
+        const e = event as { type?: string; toolName?: string };
+        if (e.type === 'cc:permission-request') {
+          const wasZero = pendingPermissionCount === 0;
+          pendingPermissionCount += 1;
+          if (wasZero) {
+            const ownerNick = readMyNick();
+            const tool = e.toolName ? ` (${e.toolName})` : '';
+            const msg = ownerNick
+              ? `@${ownerNick} 我正在等待授权${tool}`
+              : `我正在等待本机授权${tool}`;
+            void ccSendAi(topic, msg);
+          }
+        } else if (e.type === 'cc:permission-resolved') {
+          if (pendingPermissionCount > 0) pendingPermissionCount -= 1;
+        }
+      }
+      view.webview.postMessage({ type: 'claude:event', body: event });
+    };
     this.runner = createClaudeRunner({
       topic,
       // Same prompt pair the TUI feeds claude via `claude-wrap.sh`:
@@ -336,8 +363,7 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
       onSessionId: (sid) => {
         void this.context.globalState.update(sessionKey, sid);
       },
-      onEvent: (event) =>
-        view.webview.postMessage({ type: 'claude:event', body: event }),
+      onEvent: onClaudeEvent,
       onStateChange: (state) =>
         view.webview.postMessage({ type: 'claude:state', body: state }),
     });
@@ -351,6 +377,15 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
           this.myNick &&
           shouldWakeClaude(m.body, this.myNick)
         ) {
+          // Send a directed "received, processing" ACK to the asker
+          // before the SDK turn starts. AI-attributed (no `source`)
+          // so the chat-daemon broadcasts under `<nick>-cc` and peers
+          // see this as Claude's reply, not a human typing.
+          if (m.nick) {
+            void ccAtAi(topic, m.nick, '收到，处理中…');
+          } else {
+            void ccSendAi(topic, '收到，处理中…');
+          }
           this.runner?.enqueue(m.body);
         }
       });

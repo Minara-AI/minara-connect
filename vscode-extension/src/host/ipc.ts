@@ -105,3 +105,24 @@ export async function ccDrop(
 ): Promise<IpcResponse> {
   return ipcCall(topic, { action: 'drop', path: filePath, source: 'human' });
 }
+
+// AI-attributed variants. Omitting `source` makes chat_session route
+// the message through InputSource::Mcp, which broadcasts under the
+// `<nick>-cc` suffix — same channel cc-connect-mcp uses. The panel
+// uses these for runtime notices (work-acknowledged, awaiting-auth)
+// that aren't human-typed but should be visible to peers.
+
+export async function ccSendAi(
+  topic: string,
+  body: string,
+): Promise<IpcResponse> {
+  return ipcCall(topic, { action: 'send', body });
+}
+
+export async function ccAtAi(
+  topic: string,
+  nick: string,
+  body: string,
+): Promise<IpcResponse> {
+  return ipcCall(topic, { action: 'at', nick, body });
+}
