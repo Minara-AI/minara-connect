@@ -1524,26 +1524,12 @@ async fn dispatch_ipc(
             // Buffered replay: caller has a watermark and there are events
             // newer than it sitting in the ring. Return immediately.
             if let Some(ev) = mention_state.snapshot_after(since_id.as_deref()) {
-                return IpcResponse {
-                    ok: true,
-                    err: None,
-                    data: Some(serde_json::json!({
-                        "mention": ev,
-                        "reason": "buffered",
-                    })),
-                };
+                return mention_hit_response(log_path, since_id.as_deref(), ev, "buffered");
             }
 
             let timeout = std::time::Duration::from_millis(timeout_ms);
             match tokio::time::timeout(timeout, rx.recv()).await {
-                Ok(Ok(ev)) => IpcResponse {
-                    ok: true,
-                    err: None,
-                    data: Some(serde_json::json!({
-                        "mention": ev,
-                        "reason": "received",
-                    })),
-                },
+                Ok(Ok(ev)) => mention_hit_response(log_path, since_id.as_deref(), ev, "received"),
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => IpcResponse {
                     ok: true,
                     err: None,
@@ -1582,6 +1568,86 @@ fn ok_response() -> IpcResponse {
         err: None,
         data: None,
     }
+}
+
+/// Cap on `context` array length in a `wait_for_mention` hit response.
+/// Sized to fit alongside the mention body in a typical MCP tool-result
+/// payload without flooding Claude's context. The window is "between
+/// previous mention and this one"; if a noisy room buries 200 messages
+/// in one window, we keep the 50 closest to the new mention.
+const MENTION_CONTEXT_MAX: usize = 50;
+
+/// Build the IPC response for a `wait_for_mention` hit. Includes the
+/// mention itself plus the chat messages logged between `since_id` (the
+/// previous mention's id, or `None` on the very-first listener call) and
+/// the new mention. Without this, the listener loop only sees the
+/// @-mention line in isolation — the `UserPromptSubmit` hook never fires
+/// inside an MCP tool call, so prior chat that motivated the mention
+/// would be invisible.
+fn mention_hit_response(
+    log_path: &Path,
+    since_id: Option<&str>,
+    ev: MentionEvent,
+    reason: &str,
+) -> IpcResponse {
+    let context = context_between(log_path, since_id, &ev.id);
+    IpcResponse {
+        ok: true,
+        err: None,
+        data: Some(serde_json::json!({
+            "mention": {
+                "id": ev.id,
+                "ts": ev.ts,
+                "nick": ev.nick,
+                "body": ev.body,
+                "context": context,
+            },
+            "reason": reason,
+        })),
+    }
+}
+
+/// Return chat messages with id strictly between `since_id` and
+/// `until_id`, capped at `MENTION_CONTEXT_MAX` (keeping the most recent
+/// when over). Best-effort: any read error returns an empty vec rather
+/// than failing the whole IPC call. On the very-first listener call
+/// (`since_id == None`) returns nothing — the bootstrap prompt's hook
+/// injection has already given Claude all prior context.
+fn context_between(
+    log_path: &Path,
+    since_id: Option<&str>,
+    until_id: &str,
+) -> Vec<serde_json::Value> {
+    let Some(since) = since_id else {
+        return Vec::new();
+    };
+    let mut log_file = match log_io::open_or_create_log(log_path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let after_since = match log_io::read_since(&mut log_file, Some(since)) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    let in_range: Vec<_> = after_since
+        .into_iter()
+        .filter(|m| m.id.as_str() < until_id)
+        .collect();
+    let skip = in_range.len().saturating_sub(MENTION_CONTEXT_MAX);
+    in_range
+        .into_iter()
+        .skip(skip)
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "author": m.author,
+                "nick": m.nick,
+                "ts": m.ts,
+                "kind": m.kind,
+                "body": m.body,
+            })
+        })
+        .collect()
 }
 
 fn recent_messages(log_path: &Path, limit: usize) -> Result<Vec<serde_json::Value>> {

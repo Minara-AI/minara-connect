@@ -12,7 +12,12 @@ call). Whenever it returns, do this:
 - Returns the literal string `null` → no mention this window. Call
   `cc_wait_for_mention` again with the **same** `since_id` as the
   previous call (or omit it if you've never had a hit).
-- Returns a JSON `{id, ts, nick, body}` → someone @-mentioned you.
+- Returns a JSON `{id, ts, nick, body, context}` → someone @-mentioned you.
+  `context` is an array of chat messages logged between your previous
+  mention and this one (each `{id, author, nick, ts, kind, body}`,
+  capped at 50). Read it for the lead-up that motivated the mention
+  before deciding how to reply — the `UserPromptSubmit` hook does not
+  fire inside this tool call, so this is your only view of prior chat.
   Decide whether the mention warrants a reply:
   - Question or directive → reply concretely via `cc_send <body>` (or
     `cc_at <nick> <body>` if directed at one peer).
