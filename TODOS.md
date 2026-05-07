@@ -12,16 +12,23 @@
 - Workspace `Cargo.toml`: `[patch.crates-io] ed25519 = { path = "vendored/ed25519" }`, `ed25519-dalek = { path = "vendored/ed25519-dalek" }`.
 
 **Upstream PRs / issues filed (2026-04-28):**
-- `n0-computer/iroh#4192` — comment with full root-cause + workaround diff.
-- `RustCrypto/signatures#1315` — root-cause issue. (Note: `ed25519` master is *already* fixed in RustCrypto/signatures master, just unreleased; ed25519-dalek is the only crate still carrying the bug.)
-- `dalek-cryptography/curve25519-dalek#901` — PR with the actual semantic fix to `ed25519-dalek/src/signing.rs`.
+- `n0-computer/iroh#4192` — comment with full root-cause + workaround diff. Closed 2026-04-28.
+- `RustCrypto/signatures#1315` — root-cause issue. Closed 2026-04-28.
+- `dalek-cryptography/curve25519-dalek#901` — PR with the semantic fix. Closed in favour of `#902` ("bump rustcrypto dependencies to released versions"), merged 2026-05-02.
 
-**Removal trigger:** when PR#901 merges and a new `ed25519-dalek` ships against an `ed25519` that re-exports `KeyError`, iroh's `=3.0.0-pre.x` pin can be bumped. At that point:
-1. `cargo update` to pull the released ed25519-dalek.
-2. Delete `vendored/ed25519/` and `vendored/ed25519-dalek/`.
-3. Remove the two `[patch.crates-io]` entries for them in workspace `Cargo.toml`.
-4. Verify `cargo test --workspace` and `cc-connect host` still work.
-5. Commit "chore: drop vendored ed25519 patches now that upstream is unblocked."
+**Upstream status as of 2026-05-07:**
+- `ed25519` 3.0.0 stable released 2026-05-03 (and 3.0.0-rc.5 on 2026-04-28).
+- `ed25519-dalek` 3.0.0-pre.7 released 2026-05-06 — this is the first published version that compiles against current pkcs8.
+- `iroh 0.97.0` exact-pins `ed25519-dalek =3.0.0-pre.1`. `iroh 0.98.x` (latest 0.98.2) bumps the pin to `=3.0.0-pre.6`. Both pre-fix; **the iroh stack still has not released a version that picks up `pre.7+`**.
+- Verified locally on 2026-05-07: removing `[patch.crates-io]` and re-running `cargo update -p ed25519-dalek` resolves to `pre.1` (constrained by iroh) and `cargo check` fails on the same `Err(pkcs8::Error::KeyMalformed)` callsites.
+
+**Removal trigger:** when iroh ships a release that pins `ed25519-dalek 3.0.0-pre.7` or later. Watch n0-computer/iroh release notes; the cc-connect side is one-line ready (the patch entries can come out the same commit that bumps the iroh deps). At that point:
+1. Bump `iroh` / `iroh-blobs` / `iroh-gossip` together (their cross-pins move in lockstep).
+2. `cargo update` to pull the new ed25519-dalek transitively.
+3. Delete `vendored/ed25519/` and `vendored/ed25519-dalek/`.
+4. Remove the two `[patch.crates-io]` entries in workspace `Cargo.toml`.
+5. Verify `cargo test --workspace` and `cc-connect host` still work.
+6. Commit "chore: drop vendored ed25519 patches now that iroh ships pre.7+."
 
 ---
 

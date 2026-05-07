@@ -48,10 +48,15 @@ rustix = { version = "1", features = ["fs", "process"] }
 # test helpers
 tempfile = "3"
 
-# iroh stack. April 2026 the published `ed25519-3.0.0-rc.4` is broken
-# against the current pkcs8 (KeyMalformed went from unit to tuple variant);
-# we vendor + patch ed25519 in `vendored/ed25519/` to bypass. See the
-# `[patch.crates-io]` section at the bottom of this file and TODOS.md.
+# iroh stack. The published `ed25519-3.0.0-rc.4` was broken against the
+# current pkcs8 (KeyMalformed went from unit to tuple variant); we
+# vendor + patch ed25519 in `vendored/ed25519/` to bypass. ed25519
+# 3.0.0 (2026-05-03) + ed25519-dalek 3.0.0-pre.7 (2026-05-06) ship the
+# upstream fix, but iroh 0.97 has an exact pin on
+# `ed25519-dalek =3.0.0-pre.1` and iroh 0.98 only bumps it to
+# `=3.0.0-pre.6`. Both still pre-fix, so the patch stays until iroh
+# ships a release that pins pre.7+. See `[patch.crates-io]` and
+# TODOS.md.
 iroh = "0.97"
 iroh-gossip = "0.97"
 # iroh-blobs 0.99 requires iroh ^0.97 (0.97 wants iroh ^0.95 which conflicts).
@@ -66,8 +71,9 @@ strip = "symbols"
 # Local fix for the ed25519 / pkcs8 enum-variant break (see iroh deps note
 # above). Points at our vendored copy of ed25519-3.0.0-rc.4 with three
 # `Error::KeyMalformed` references swapped to the unit variant
-# `Error::ParametersMalformed`. Drop this once upstream ships ed25519
-# rc.5 / 3.0.0 stable that compiles against current pkcs8.
+# `Error::ParametersMalformed`. Drop this once iroh ships a release that
+# pins ed25519-dalek 3.0.0-pre.7+ (the upstream fix landed there but
+# the iroh stack hasn't picked it up yet).
 [patch.crates-io]
 ed25519 = { path = "vendored/ed25519" }
 ed25519-dalek = { path = "vendored/ed25519-dalek" }
