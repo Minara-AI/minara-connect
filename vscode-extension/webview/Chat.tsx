@@ -7,9 +7,17 @@ import {
   mentionCandidates,
 } from './mentionAutocomplete';
 import { focusTextareaAt } from './textareaFocus';
-import type { Message } from './types';
+import { KIND_FILE_DROP, type Message } from './types';
 import { useAutosize } from './useAutosize';
 import { useStickyScroll } from './useStickyScroll';
+
+function formatBytes(n: number | null | undefined): string {
+  if (typeof n !== 'number' || n < 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
 
 /** AI peers carry a `<nick>-cc` suffix (see src/host/mention.ts).
  *  Their messages are model output and benefit from markdown
@@ -24,6 +32,8 @@ interface ChatProps {
   onSend?: (body: string) => void;
   onAttach?: () => void;
   onPasteFiles?: (files: { name: string; dataB64: string }[]) => void;
+  onOpenDrop?: (filename: string) => void;
+  onSaveDrop?: (filename: string) => void;
 }
 
 interface SlashCommand {
@@ -43,6 +53,8 @@ export function Chat({
   onSend,
   onAttach,
   onPasteFiles,
+  onOpenDrop,
+  onSaveDrop,
 }: ChatProps): React.ReactElement {
   const [draft, setDraft] = React.useState('');
 
@@ -232,9 +244,21 @@ export function Chat({
         ) : (
           grouped.map((row) =>
             row.continuation ? (
-              <ChatContinuation key={row.message.id} row={row} myNick={myNick} />
+              <ChatContinuation
+                key={row.message.id}
+                row={row}
+                myNick={myNick}
+                onOpenDrop={onOpenDrop}
+                onSaveDrop={onSaveDrop}
+              />
             ) : (
-              <ChatRow key={row.message.id} row={row} myNick={myNick} />
+              <ChatRow
+                key={row.message.id}
+                row={row}
+                myNick={myNick}
+                onOpenDrop={onOpenDrop}
+                onSaveDrop={onSaveDrop}
+              />
             ),
           )
         )}
@@ -324,13 +348,46 @@ function groupMessages(
   return out;
 }
 
+interface ChatRowExtras {
+  onOpenDrop?: (filename: string) => void;
+  onSaveDrop?: (filename: string) => void;
+}
+
+function ChatBody({
+  m,
+  myNick,
+  onOpenDrop,
+  onSaveDrop,
+}: {
+  m: Message;
+  myNick: string;
+} & ChatRowExtras): React.ReactElement {
+  if (m.kind === KIND_FILE_DROP) {
+    return (
+      <FileDropAttachment
+        filename={m.body}
+        size={m.blob_size ?? null}
+        onOpen={onOpenDrop}
+        onSave={onSaveDrop}
+      />
+    );
+  }
+  return isAiNick(m.nick) ? (
+    <MarkdownContent text={m.body} />
+  ) : (
+    <>{highlightMentions(m.body, myNick)}</>
+  );
+}
+
 function ChatRow({
   row,
   myNick,
+  onOpenDrop,
+  onSaveDrop,
 }: {
   row: ChatRowData;
   myNick: string;
-}): React.ReactElement {
+} & ChatRowExtras): React.ReactElement {
   const m = row.message;
   // Local timezone, not UTC. `toISOString().slice(11,16)` showed UTC,
   // which doesn't match peers' wall clocks across zones.
@@ -356,11 +413,12 @@ function ChatRow({
           <span className="chat-ts">{time}</span>
         </div>
         <div className="chat-text">
-          {isAiNick(m.nick) ? (
-            <MarkdownContent text={m.body} />
-          ) : (
-            highlightMentions(m.body, myNick)
-          )}
+          <ChatBody
+            m={m}
+            myNick={myNick}
+            onOpenDrop={onOpenDrop}
+            onSaveDrop={onSaveDrop}
+          />
         </div>
       </div>
     </div>
@@ -370,22 +428,65 @@ function ChatRow({
 function ChatContinuation({
   row,
   myNick,
+  onOpenDrop,
+  onSaveDrop,
 }: {
   row: ChatRowData;
   myNick: string;
-}): React.ReactElement {
+} & ChatRowExtras): React.ReactElement {
   return (
     <div className={`chat-row continuation ${row.isMe ? 'me' : 'peer'}`}>
       <div className="chat-avatar-spacer" />
       <div className="chat-body">
         <div className="chat-text">
-          {isAiNick(row.message.nick) ? (
-            <MarkdownContent text={row.message.body} />
-          ) : (
-            highlightMentions(row.message.body, myNick)
-          )}
+          <ChatBody
+            m={row.message}
+            myNick={myNick}
+            onOpenDrop={onOpenDrop}
+            onSaveDrop={onSaveDrop}
+          />
         </div>
       </div>
+    </div>
+  );
+}
+
+function FileDropAttachment({
+  filename,
+  size,
+  onOpen,
+  onSave,
+}: {
+  filename: string;
+  size: number | null;
+  onOpen?: (filename: string) => void;
+  onSave?: (filename: string) => void;
+}): React.ReactElement {
+  const sizeLabel = formatBytes(size);
+  return (
+    <div className="file-drop">
+      <button
+        type="button"
+        className="file-drop-main"
+        onClick={() => onOpen?.(filename)}
+        title={`Open ${filename}`}
+        disabled={!onOpen}
+      >
+        <i className="codicon codicon-file" />
+        <span className="file-drop-name">{filename}</span>
+        {sizeLabel && <span className="file-drop-size">{sizeLabel}</span>}
+      </button>
+      {onSave && (
+        <button
+          type="button"
+          className="file-drop-save"
+          onClick={() => onSave(filename)}
+          title={`Save ${filename} to a chosen location`}
+          aria-label="Save copy"
+        >
+          <i className="codicon codicon-cloud-download" />
+        </button>
+      )}
     </div>
   );
 }

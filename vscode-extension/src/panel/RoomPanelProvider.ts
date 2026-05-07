@@ -256,6 +256,59 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
               body: resp.err ?? 'unknown ipc error',
             });
           }
+        } else if (msg.type === 'chat:open-drop') {
+          // Webview clicked a file_drop chip. Resolve to the on-disk
+          // path under <topic>/files/ and let VSCode's default opener
+          // handle it (text editor, image preview, markdown render,
+          // etc.). If the blob hasn't downloaded yet, surface a tip
+          // so the user knows to retry instead of staring at silence.
+          const filename =
+            typeof msg.body === 'string' ? msg.body.trim() : '';
+          if (!filename) return;
+          const local = resolveDroppedFile(t, filename);
+          if (!local) {
+            void vscode.window.showInformationMessage(
+              `cc-connect: ${filename} hasn't finished downloading yet — try again in a moment.`,
+            );
+            return;
+          }
+          await vscode.commands.executeCommand(
+            'vscode.open',
+            vscode.Uri.file(local),
+          );
+        } else if (msg.type === 'chat:save-drop') {
+          // Save-as: copy the cached blob to a user-chosen path so
+          // they can keep a working copy outside the per-Room files
+          // dir (where future cc-connect housekeeping might evict it).
+          const filename =
+            typeof msg.body === 'string' ? msg.body.trim() : '';
+          if (!filename) return;
+          const local = resolveDroppedFile(t, filename);
+          if (!local) {
+            void vscode.window.showInformationMessage(
+              `cc-connect: ${filename} hasn't finished downloading yet — try again in a moment.`,
+            );
+            return;
+          }
+          const base = path.basename(filename);
+          const target = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(
+              path.join(os.homedir(), 'Downloads', base),
+            ),
+            saveLabel: 'Save',
+            title: `Save ${base}`,
+          });
+          if (!target) return;
+          try {
+            fs.copyFileSync(local, target.fsPath);
+            void vscode.window.showInformationMessage(
+              `cc-connect: saved ${base} to ${target.fsPath}`,
+            );
+          } catch (e) {
+            void vscode.window.showErrorMessage(
+              `cc-connect: save failed — ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
         } else if (msg.type === 'chat:paste-files') {
           // Webview pasted one or more File items (screenshot, dragged
           // image, etc.). Webview is sandboxed, so it ferried the
@@ -412,6 +465,48 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
  *  Lives in VSCode's storage, so cleanup goes with the extension. */
 function sessionStateKey(topic: string): string {
   return `cc-connect.session.${topic}`;
+}
+
+/** Resolve the on-disk path of a file_drop'd file. The chat-daemon
+ *  saves attachments under `~/.cc-connect/rooms/<topic>/files/` with
+ *  a `<id>-<filename>` naming convention (per
+ *  cc-connect-core/src/hook_format.rs). We scan the directory and
+ *  pick the most-recently-modified entry whose name ends in the
+ *  requested basename. Returns null if the room dir is missing or
+ *  the blob hasn't been downloaded yet. */
+function resolveDroppedFile(topic: string, filename: string): string | null {
+  const filesDir = path.join(
+    os.homedir(),
+    '.cc-connect',
+    'rooms',
+    topic,
+    'files',
+  );
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(filesDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const want = path.basename(filename);
+  const candidates: { full: string; mtimeMs: number }[] = [];
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    // The disk name is `<id>-<filename>`. Match on suffix to recover
+    // the original. Tolerate the rare case where someone dropped a
+    // file whose name happens to start with `-`.
+    if (e.name === want || e.name.endsWith(`-${want}`)) {
+      const full = path.join(filesDir, e.name);
+      try {
+        candidates.push({ full, mtimeMs: fs.statSync(full).mtimeMs });
+      } catch {
+        /* drop unreadable entries */
+      }
+    }
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates[0].full;
 }
 
 function readMyNick(): string | undefined {
@@ -690,6 +785,16 @@ function roomHtml(webview: vscode.Webview, distRoot: vscode.Uri): string {
     .file-chip:hover { background: rgba(95,168,211,0.26); border-color: rgba(95,168,211,0.5); }
     .file-chip .codicon { font-size: 11px; opacity: 0.75; }
     .file-chip-name { white-space: nowrap; }
+    .file-drop { display: inline-flex; align-items: stretch; gap: 0; max-width: 100%; border-radius: 8px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editorWidget-background, rgba(127,127,127,0.08)); overflow: hidden; }
+    .file-drop-main { flex: 1 1 auto; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 0; background: transparent; color: var(--vscode-foreground); cursor: pointer; min-width: 0; text-align: left; font: inherit; }
+    .file-drop-main:hover:not(:disabled) { background: rgba(95,168,211,0.12); }
+    .file-drop-main:disabled { cursor: default; opacity: 0.7; }
+    .file-drop-main .codicon { font-size: 14px; opacity: 0.85; flex: 0 0 auto; }
+    .file-drop-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .file-drop-size { opacity: 0.55; font-size: 11px; flex: 0 0 auto; }
+    .file-drop-save { display: flex; align-items: center; justify-content: center; padding: 0 10px; border: 0; border-left: 1px solid var(--vscode-panel-border); background: transparent; color: var(--vscode-foreground); cursor: pointer; }
+    .file-drop-save:hover { background: rgba(95,168,211,0.18); }
+    .file-drop-save .codicon { font-size: 14px; opacity: 0.8; }
     .claude-system { opacity: 0.45; font-size: 11px; padding: 4px 0; }
     .claude-thinking { font-size: 11px; opacity: 0.55; font-style: italic; padding: 4px 0 6px; }
     .claude-thinking.ongoing { animation: cc-pulse 1.4s ease-in-out infinite; }

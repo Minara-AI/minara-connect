@@ -193,6 +193,14 @@ function App(): React.ReactElement {
     vscode.postMessage({ type: 'chat:paste-files', body: files });
   };
 
+  const onOpenDrop = (filename: string): void => {
+    vscode.postMessage({ type: 'chat:open-drop', body: filename });
+  };
+
+  const onSaveDrop = (filename: string): void => {
+    vscode.postMessage({ type: 'chat:save-drop', body: filename });
+  };
+
   const onPrompt = (body: string): void => {
     vscode.postMessage({ type: 'claude:prompt', body });
     // Synthesize a local-only event so the prompt renders in the
@@ -316,6 +324,8 @@ function App(): React.ReactElement {
             onSend={onSend}
             onAttach={onAttach}
             onPasteFiles={onPasteFiles}
+            onOpenDrop={onOpenDrop}
+            onSaveDrop={onSaveDrop}
           />
         </div>
         <div
