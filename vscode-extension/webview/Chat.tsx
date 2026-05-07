@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { highlightMentions } from './highlightMentions';
+import { MarkdownContent } from './MarkdownContent';
 import {
   completeAt,
   currentAtToken,
@@ -10,11 +11,19 @@ import type { Message } from './types';
 import { useAutosize } from './useAutosize';
 import { useStickyScroll } from './useStickyScroll';
 
+/** AI peers carry a `<nick>-cc` suffix (see src/host/mention.ts).
+ *  Their messages are model output and benefit from markdown
+ *  rendering; humans keep plain text + mention highlighting. */
+function isAiNick(nick: string | null | undefined): boolean {
+  return !!nick && nick.endsWith('-cc');
+}
+
 interface ChatProps {
   messages: Message[];
   myNick: string;
   onSend?: (body: string) => void;
   onAttach?: () => void;
+  onPasteFiles?: (files: { name: string; dataB64: string }[]) => void;
 }
 
 interface SlashCommand {
@@ -33,6 +42,7 @@ export function Chat({
   myNick,
   onSend,
   onAttach,
+  onPasteFiles,
 }: ChatProps): React.ReactElement {
   const [draft, setDraft] = React.useState('');
 
@@ -118,6 +128,9 @@ export function Chat({
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+    // IME composition (Pinyin, kana, etc.) — Enter finalizes the
+    // candidate, never the message.
+    if (e.nativeEvent.isComposing) return;
     if (slashOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -176,6 +189,25 @@ export function Chat({
     const next = e.target.value;
     setDraft(next);
     updatePopups(next, e.target.selectionStart);
+  };
+
+  // When the clipboard has File items (screenshot, dragged-from-Finder
+  // file, etc.), drop them into the Room instead of letting the
+  // textarea paste their filename / data-URL. The webview is a
+  // sandbox: we ferry bytes to the extension host as base64 and let
+  // it write a temp file + cc_drop it.
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>): void => {
+    if (!onPasteFiles) return;
+    const dt = e.clipboardData;
+    if (!dt || dt.files.length === 0) return;
+    e.preventDefault();
+    const files = Array.from(dt.files);
+    void Promise.all(
+      files.map(async (f) => ({
+        name: f.name || 'pasted-file',
+        dataB64: await fileToBase64(f),
+      })),
+    ).then(onPasteFiles);
   };
 
   const empty = draft.trim().length === 0;
@@ -248,7 +280,8 @@ export function Chat({
             value={draft}
             onChange={onChange}
             onKeyDown={onKeyDown}
-            placeholder="Message · Enter sends · @ to mention"
+            onPaste={onPaste}
+            placeholder="Message · Enter sends · @ to mention · paste a file to drop"
             rows={1}
           />
           <button
@@ -322,7 +355,13 @@ function ChatRow({
           <span className="chat-nick">{nick}</span>
           <span className="chat-ts">{time}</span>
         </div>
-        <div className="chat-text">{highlightMentions(m.body, myNick)}</div>
+        <div className="chat-text">
+          {isAiNick(m.nick) ? (
+            <MarkdownContent text={m.body} />
+          ) : (
+            highlightMentions(m.body, myNick)
+          )}
+        </div>
       </div>
     </div>
   );
@@ -340,7 +379,11 @@ function ChatContinuation({
       <div className="chat-avatar-spacer" />
       <div className="chat-body">
         <div className="chat-text">
-          {highlightMentions(row.message.body, myNick)}
+          {isAiNick(row.message.nick) ? (
+            <MarkdownContent text={row.message.body} />
+          ) : (
+            highlightMentions(row.message.body, myNick)
+          )}
         </div>
       </div>
     </div>
@@ -425,6 +468,24 @@ function deriveRecentNicks(
     out.push(nick);
   }
   return out;
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(r.error ?? new Error('read failed'));
+    r.onload = () => {
+      const result = r.result;
+      if (typeof result !== 'string') {
+        reject(new Error('expected data URL'));
+        return;
+      }
+      // result is `data:<mime>;base64,<payload>` — strip prefix.
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    r.readAsDataURL(file);
+  });
 }
 
 function colorForNick(nick: string): string {

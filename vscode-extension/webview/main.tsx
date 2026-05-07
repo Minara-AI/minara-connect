@@ -186,6 +186,13 @@ function App(): React.ReactElement {
     vscode.postMessage({ type: 'chat:attach' });
   };
 
+  const onPasteFiles = (
+    files: { name: string; dataB64: string }[],
+  ): void => {
+    if (files.length === 0) return;
+    vscode.postMessage({ type: 'chat:paste-files', body: files });
+  };
+
   const onPrompt = (body: string): void => {
     vscode.postMessage({ type: 'claude:prompt', body });
     // Synthesize a local-only event so the prompt renders in the
@@ -308,6 +315,7 @@ function App(): React.ReactElement {
             myNick={myNick}
             onSend={onSend}
             onAttach={onAttach}
+            onPasteFiles={onPasteFiles}
           />
         </div>
         <div

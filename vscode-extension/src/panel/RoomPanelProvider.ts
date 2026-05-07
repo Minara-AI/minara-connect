@@ -256,6 +256,50 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
               body: resp.err ?? 'unknown ipc error',
             });
           }
+        } else if (msg.type === 'chat:paste-files') {
+          // Webview pasted one or more File items (screenshot, dragged
+          // image, etc.). Webview is sandboxed, so it ferried the
+          // bytes as base64. Materialize them under os.tmpdir() and
+          // hand the path to ccDrop — chat-daemon hashes + persists
+          // into iroh-blobs from there.
+          const files = Array.isArray(msg.body)
+            ? (msg.body as { name?: unknown; dataB64?: unknown }[])
+            : [];
+          const scratchDir = path.join(
+            os.tmpdir(),
+            `cc-connect-paste-${process.pid}`,
+          );
+          try {
+            fs.mkdirSync(scratchDir, { recursive: true, mode: 0o700 });
+          } catch {
+            // best-effort; if mkdir fails the writes below will too.
+          }
+          for (const f of files) {
+            const name = typeof f.name === 'string' && f.name ? f.name : 'pasted-file';
+            const dataB64 = typeof f.dataB64 === 'string' ? f.dataB64 : '';
+            if (!dataB64) continue;
+            const safeName = path.basename(name).replace(/[^\w.\-]/g, '_');
+            const tmpPath = path.join(
+              scratchDir,
+              `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName}`,
+            );
+            try {
+              fs.writeFileSync(tmpPath, Buffer.from(dataB64, 'base64'));
+            } catch (e) {
+              view.webview.postMessage({
+                type: 'chat:send-error',
+                body: `paste write failed: ${e instanceof Error ? e.message : String(e)}`,
+              });
+              continue;
+            }
+            const resp = await ccDrop(t, tmpPath);
+            if (!resp.ok) {
+              view.webview.postMessage({
+                type: 'chat:send-error',
+                body: resp.err ?? 'unknown ipc error',
+              });
+            }
+          }
         }
       },
     );

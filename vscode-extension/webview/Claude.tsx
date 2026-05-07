@@ -171,6 +171,9 @@ export function Claude({
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+    // IME composition (Pinyin, kana, etc.) — Enter finalizes the
+    // candidate, never the prompt.
+    if (e.nativeEvent.isComposing) return;
     if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       submit();
