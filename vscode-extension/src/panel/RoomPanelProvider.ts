@@ -15,10 +15,12 @@ import {
   createClaudeRunner,
   type ClaudeRunnerHandle,
 } from '../host/claude_runner';
+import type { SupportedPermissionMode } from '../host/claude_runner';
 import { ccAtAi, ccDrop, ccSend, ccSendAi } from '../host/ipc';
 import { tailLog, type LogTailHandle } from '../host/log_tail';
 import { shouldWakeClaude } from '../host/mention';
 import { loadLauncherPrompts } from '../host/prompts';
+import { detectSensitiveContent } from '../host/risk';
 import {
   listSessions,
   loadSession,
@@ -36,6 +38,23 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
   private runner?: ClaudeRunnerHandle;
   private messageDisposable?: vscode.Disposable;
   private editorDisposable?: vscode.Disposable;
+  // First-handshake gating, per active Room. Cleared in tearDown.
+  // - seenAuthors: NodeIds the user has already accepted (or recognised
+  //   as self) in this session.
+  // - blockedAuthors: NodeIds the user explicitly chose to drop.
+  // - handshakeDecisions: in-flight prompts so two messages from the
+  //   same author share the same toast instead of stacking.
+  private seenAuthors = new Set<string>();
+  private blockedAuthors = new Set<string>();
+  private handshakeDecisions = new Map<string, Promise<boolean>>();
+  // Mirror of the runner's permission mode so the panel can decide
+  // when to auto-downgrade. Updated from the runner's onStateChange.
+  private currentPermissionMode: SupportedPermissionMode =
+    'bypassPermissions';
+  // One-shot per active Room — once an auto-downgrade has fired, even
+  // if the user manually flips back to a permissive mode, don't keep
+  // overriding their choice.
+  private autoDowngradedThisSession = false;
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -80,6 +99,65 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
     this.tail = undefined;
     this.runner?.abort();
     this.runner = undefined;
+    this.seenAuthors.clear();
+    this.blockedAuthors.clear();
+    this.handshakeDecisions.clear();
+    this.currentPermissionMode = 'bypassPermissions';
+    this.autoDowngradedThisSession = false;
+  }
+
+  /** Gate the first message from each unfamiliar peer behind a
+   *  consent toast. Returns true if the message should be delivered,
+   *  false if it should be dropped (peer blocked or user dismissed
+   *  the prompt). Subsequent messages from the same author share the
+   *  same in-flight promise so a flood of messages from one peer
+   *  doesn't stack toasts. */
+  private gateFirstHandshake(m: Message, isSelf: boolean): Promise<boolean> {
+    if (this.blockedAuthors.has(m.author)) return Promise.resolve(false);
+    if (isSelf || this.seenAuthors.has(m.author)) {
+      this.seenAuthors.add(m.author);
+      return Promise.resolve(true);
+    }
+    const cached = this.handshakeDecisions.get(m.author);
+    if (cached) return cached;
+    const peerLabel = m.nick ? `@${m.nick}` : '(no nick)';
+    const idShort = m.author.slice(0, 12);
+    const decision: Promise<boolean> = (async () => {
+      const choice = await vscode.window.showWarningMessage(
+        `cc-connect: new peer ${peerLabel} (NodeId ${idShort}…) joined this Room. Accept their messages?`,
+        { modal: false },
+        'Accept',
+        'Block (this session)',
+      );
+      const ok = choice === 'Accept';
+      if (ok) this.seenAuthors.add(m.author);
+      else this.blockedAuthors.add(m.author);
+      this.handshakeDecisions.delete(m.author);
+      return ok;
+    })();
+    this.handshakeDecisions.set(m.author, decision);
+    return decision;
+  }
+
+  /** When chat content mentions credential paths or key files AND the
+   *  Claude is in a permissive mode, flip to `default` so each tool
+   *  call gets an explicit Allow/Deny. One-shot per active Room — a
+   *  user who manually re-permits later isn't second-guessed. */
+  private maybeAutoDowngrade(body: string): void {
+    if (this.autoDowngradedThisSession) return;
+    if (
+      this.currentPermissionMode !== 'bypassPermissions' &&
+      this.currentPermissionMode !== 'acceptEdits'
+    ) {
+      return;
+    }
+    const risk = detectSensitiveContent(body);
+    if (!risk.matched) return;
+    this.runner?.setPermissionMode('default');
+    this.autoDowngradedThisSession = true;
+    void vscode.window.showWarningMessage(
+      `cc-connect: chat mentioned ${risk.label} — switched to "ask all" so each tool call needs explicit approval.`,
+    );
   }
 
   /** Push the current active editor (if any) to the webview so the
@@ -417,30 +495,44 @@ export class RoomPanelProvider implements vscode.WebviewViewProvider {
         void this.context.globalState.update(sessionKey, sid);
       },
       onEvent: onClaudeEvent,
-      onStateChange: (state) =>
-        view.webview.postMessage({ type: 'claude:state', body: state }),
+      onStateChange: (state) => {
+        this.currentPermissionMode = state.mode;
+        view.webview.postMessage({ type: 'claude:state', body: state });
+      },
     });
 
     try {
       this.tail = tailLog(topic, (m: Message) => {
-        view.webview.postMessage({ type: 'chat:message', body: m });
         const fromOwnAi = !!this.myNick && m.nick === `${this.myNick}-cc`;
-        if (
-          !fromOwnAi &&
-          this.myNick &&
-          shouldWakeClaude(m.body, this.myNick)
-        ) {
-          // Send a directed "received, processing" ACK to the asker
-          // before the SDK turn starts. AI-attributed (no `source`)
-          // so the chat-daemon broadcasts under `<nick>-cc` and peers
-          // see this as Claude's reply, not a human typing.
-          if (m.nick) {
-            void ccAtAi(topic, m.nick, '收到，处理中…');
-          } else {
-            void ccSendAi(topic, '收到，处理中…');
+        const fromOwnHuman = !!this.myNick && m.nick === this.myNick;
+        const isSelf = fromOwnAi || fromOwnHuman;
+        // Run the first-handshake gate asynchronously; chat:message
+        // posting waits on the user's Accept/Block decision so peers
+        // they reject never see content from those NodeIds.
+        void this.gateFirstHandshake(m, isSelf).then((allowed) => {
+          if (!allowed) return;
+          view.webview.postMessage({ type: 'chat:message', body: m });
+          // Don't auto-downgrade on our own AI's messages — those
+          // contain the very keywords the rule trips on (e.g. when
+          // the user asks Claude about ssh keys themselves).
+          if (!isSelf) this.maybeAutoDowngrade(m.body);
+          if (
+            !fromOwnAi &&
+            this.myNick &&
+            shouldWakeClaude(m.body, this.myNick)
+          ) {
+            // Send a directed "received, processing" ACK to the asker
+            // before the SDK turn starts. AI-attributed (no `source`)
+            // so the chat-daemon broadcasts under `<nick>-cc` and peers
+            // see this as Claude's reply, not a human typing.
+            if (m.nick) {
+              void ccAtAi(topic, m.nick, '收到，处理中…');
+            } else {
+              void ccSendAi(topic, '收到，处理中…');
+            }
+            this.runner?.enqueue(m.body);
           }
-          this.runner?.enqueue(m.body);
-        }
+        });
       });
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);

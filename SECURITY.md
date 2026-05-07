@@ -29,6 +29,8 @@ If you find a vulnerability that this document does not already disclose, please
 | Path traversal on file_drop | Filenames are validated; `/`, `\`, NUL are rejected (`message.rs::validate_filename`). Files land in `~/.cc-connect/rooms/<topic>/files/<id>-<name>`. |
 | Prompt-injection of sensitive local files via `cc_drop` | Path blocklist (since v0.4.3-alpha): paths under `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gcloud`, `.git/`, and filenames matching `.env*`, `id_rsa*`, `id_ed25519*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `.netrc`, `.npmrc` are refused. Override with `CC_CONNECT_DROP_ALLOW_DANGEROUS=1` for the calling process. |
 | Per-author flooding | Sliding-window rate limit (since v0.4.3-alpha): incoming Messages are dropped on receivers when an author exceeds 30 messages / 10s. The display surfaces a warning at most once per 30s per offender. |
+| First-handshake consent (VSCode extension only) | Since vscode-extension v0.4.4: the first message from each unfamiliar NodeId in a Room is held until the user explicitly clicks Accept or Block. Block is per-session in-memory; reopening the Room re-prompts. The TUI does not yet implement this. |
+| Sensitive-content auto-downgrade (VSCode extension only) | Since vscode-extension v0.4.4: when a peer's chat body matches credential-path / private-key / bearer-token heuristics (`risk.ts`), the panel flips Claude's permission mode to `default` ("ask all") so each subsequent tool call needs explicit Allow/Deny. One-shot per Room session — manual override sticks. |
 
 ---
 
