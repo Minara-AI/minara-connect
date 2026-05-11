@@ -78,6 +78,46 @@ cd cc-connect
 
 ---
 
+## Upgrading from pre-v0.6
+
+If you already have cc-connect installed from before the MCP-first pivot, the in-place upgrade preserves your identity, nicknames, and Rooms while picking up the new MCP tools and trust boundary:
+
+```bash
+cc-connect upgrade                                          # source install
+# OR
+curl -fsSL <…/bootstrap.sh> | bash                          # binary install (idempotent)
+```
+
+Then **fully quit Claude Code** (Cmd-Q on macOS, not just close the window) and reopen so it picks up the new `cc-connect-mcp` tool surface — five new room-lifecycle tools, `cc_wait_for_mention` removed.
+
+After the restart, every `claude` you open is no-op'd by the hook until it explicitly calls `cc_create_room` or `cc_join_room` — the v0.6 trust boundary is the **Claude PID Binding** ([ADR-0006](./docs/adr/0006-trust-boundary-claude-pid-binding.md)), not the `CC_CONNECT_ROOM` env var.
+
+What else changes (most of it transparent):
+
+- `CC_CONNECT_ROOM` set anywhere (shell rc, tmux env, exported elsewhere) is now **ignored**. Safe to delete; no need to.
+- Existing `cc-connect room start` / `room join` invocations keep working — `layouts/claude-wrap.sh` now writes the new `rooms.json` for the about-to-be-`claude` PID before `exec claude`. Both legacy launchers are flagged for removal in v0.7.
+- If anything in your stack scripted the removed `cc_wait_for_mention` MCP tool, replace it with the per-prompt hook injection plus on-demand `cc_recent`. See [ADR-0005](./docs/adr/0005-mcp-first-architecture.md).
+- VSCode extension: the chat panel still works as a side-channel viewer; the bundled Claude pane is deprecated. Install the latest `.vsix` (≥ 0.4.5) and consider switching to plain `claude` in VSCode's integrated terminal.
+- Run `cc-connect doctor` after the upgrade — it now also prunes orphan `~/.cc-connect/sessions/by-claude-pid/<pid>/` dirs from any pre-upgrade Claudes that exited without cleanup.
+
+### Clean-wipe path (only if you want a fresh start)
+
+If you'd rather wipe everything — including your identity (Pubkey) and saved nickname — and reinstall from zero:
+
+```bash
+cc-connect uninstall --purge       # stops daemons, strips hook + MCP entries,
+                                   # removes ~/.local/bin symlinks,
+                                   # wipes ~/.cc-connect/, /tmp/cc-connect-$UID/,
+                                   # and ~/.claude/*.json.bak.* backups.
+# fully quit Claude Code
+curl -fsSL <…/bootstrap.sh> | bash
+# restart Claude Code
+```
+
+`--purge` deletes your machine's Pubkey identity, so peers will see you as a brand-new participant after this. Use only if you actually want that — for routine upgrades, the in-place path above is what you want.
+
+---
+
 ## Use it
 
 After install + Claude-Code restart, the substrate is wired. Day-to-day:
