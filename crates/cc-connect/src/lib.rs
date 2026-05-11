@@ -19,6 +19,7 @@ pub mod lifecycle;
 pub mod room;
 pub mod setup;
 pub mod ticket_payload;
+pub mod watch;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -159,6 +160,12 @@ pub enum Command {
     /// consent. Use to audit what Claude has asked for, or to fish out
     /// a token after dismissing the original `cc_join_room` reply.
     PendingList,
+    /// Side-channel viewer for the MCP-first model: surfaces pending
+    /// `cc_join_room` requests as they arrive (with the matching
+    /// `cc-connect accept <token>` hint) and tails the chat log of
+    /// every Room any of this user's running Claudes are bound to.
+    /// Long-running; Ctrl-C to stop.
+    Watch,
 }
 
 #[derive(Subcommand)]
@@ -300,5 +307,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Upgrade { yes } => lifecycle::run_upgrade(yes),
         Command::Accept { token } => accept::run_accept(&token),
         Command::PendingList => accept::run_pending_list(),
+        Command::Watch => watch::run_watch(),
     }
 }
