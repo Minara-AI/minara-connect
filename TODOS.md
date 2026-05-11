@@ -68,6 +68,23 @@
 
 ---
 
+### Skill distribution to end users (MCP-first follow-up)
+
+**What:** Distribute the user-facing cc-connect skills (`cc-connect-setup`, `cc-connect-room`, `cc-connect-chat`, `cc-connect-relay-setup`) to end-user machines, so a fresh `claude` outside the cc-connect repo can still get the slash-command UX. Today these live in `.claude/skills/` and are repo-local — only Claude sessions opened inside the cc-connect checkout see them. Bootstrap/install ships zero skills (verified 2026-05-11 against `install.sh`, `scripts/bootstrap.sh`, `.github/workflows/release.yml`).
+
+**Why:** The v0.6 MCP-first README points users at `claude` for the magic moment, but the orientation scaffolding (how to phrase "create a room", "join a room", "send to chat") lives in the repo-local skills. Without distribution, fresh users have to either (a) memorise the MCP tool names or (b) lean on hook-injected orientation only. Both are worse than `/cc-connect-setup`.
+
+**Options to evaluate:**
+- Install to `~/.claude/skills/` from `install.sh` (host-machine scope). Aligns with how hook + MCP register today. Needs an entry in `lifecycle.rs::run_uninstall` to remove them on uninstall.
+- Ship as a Claude Code plugin manifest. Cleaner separation but a heavier integration with whatever plugin-distribution surface lands in Claude Code.
+- Both — `install.sh` writes to `~/.claude/skills/` for the no-Rust bootstrap path; plugin manifest for users who prefer the plugin surface.
+
+**Depends on:** v0.6 ships; clarity on the Claude Code plugin surface circa 2026-05.
+
+**Context:** Surfaced 2026-05-11 while cutting v0.6.0-rc.1 — bootstrap/install path verified to not ship skills.
+
+---
+
 ### Cursor format extension: byte_offset for log scan
 
 **What:** Cursor file stores `{ulid, byte_offset}` instead of just `ulid`. Hook seeks to byte_offset, verifies the next record's ULID matches, then continues forward.
