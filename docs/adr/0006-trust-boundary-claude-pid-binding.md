@@ -1,0 +1,24 @@
+# Trust boundary: Claude PID Binding (replaces `CC_CONNECT_ROOM` env var)
+
+The trust boundary that keeps one user's chat substrate from bleeding into every Claude Code session on the box (CLAUDE.md "trust boundary"; SECURITY.md "Cross-process Claude isolation") used to ride on the `CC_CONNECT_ROOM` environment variable. The chat-session host (`cc-connect-tui` or the VSCode extension's Claude pane) set `CC_CONNECT_ROOM=<topic_id_hex>` when it spawned its `claude` child, the env var propagated to every subprocess Claude later launched (the `UserPromptSubmit` hook, `cc-connect-mcp`), and unrelated `claude` invocations on the same machine — without that env var — saw nothing.
+
+ADR-0005's MCP-first pivot breaks this. In MCP-first the user's own `claude` is no longer launched by cc-connect; we cannot set its environment. The hook + MCP server need a different way to determine "is this Claude in a Room? which one(s)?"
+
+We chose **Claude PID Binding** with a **consent gate** for `cc_join_room`.
+
+**The mechanism.** Both the hook and the MCP server walk their parent process chain (Linux: read `/proc/<pid>/stat` for ppid + `/proc/<pid>/exe` for the binary path; macOS: shell out to `ps -p <pid> -o ppid=,comm=`) until they reach a process whose executable basename is `claude`. That ancestor's PID `P_C` keys the per-Claude state file `~/.cc-connect/sessions/by-claude-pid/<P_C>/rooms.json` — an array of topic_hex values that this specific Claude has joined. The hook injects context only for those topics. If no `claude` ancestor is found within a depth bound (16 levels), the hook is a no-op. Cross-Claude isolation comes for free: a different Claude Code window has a different PID and a different rooms.json (or none).
+
+The walk is robust against intermediate shells (e.g. `bash -c` invocations) — empirically the hook + MCP server are at most 1-2 hops below `claude`, and the depth bound is generous. Orphaned `<pid>/` dirs (Claude exited without explicit `cc_leave_room`) are pruned opportunistically on every hook fire and MCP server startup via `rustix::process::test_kill_process`. Old TUI / multiplexer launchers migrate to the new mechanism by writing rooms.json under their *own* shell PID `$$` before `exec claude` — POSIX guarantees PID is preserved across `exec`.
+
+**The consent gate on `cc_join_room`.** The MCP server does **not** add a topic to `rooms.json` directly when Claude calls `cc_join_room`. Instead it writes a pending-join file at `~/.cc-connect/pending-joins/<token>.json` and returns the token to Claude. The human reviews the pending join in the side-channel viewer (CLI `cc-connect watch` or the VSCode chat-only panel) and runs `cc-connect accept <token>` (or clicks Accept) to actually consent. Until then, the hook injects nothing for that topic.
+
+This closes the prompt-injection pivot SECURITY.md §3 calls out: a hostile chat line that successfully prompt-injects Claude into calling `cc_join_room("malicious-ticket")` does not, by itself, subscribe Claude to the hostile Room. The human is the gatekeeper. `cc_create_room` does **not** require a consent gate — that's the user creating a Room on their own machine, the trust posture is symmetric to a regular file write.
+
+Rejected alternatives:
+
+- **Keep `CC_CONNECT_ROOM` as a fallback during transition.** This was the slop we explicitly rejected during planning. A test-only escape hatch was tempting (let smoke tests work without a real `claude`), but it widens the trust surface for marginal test convenience. Smoke tests will be rewritten with a fake-`claude` process tree.
+- **Use Claude Code's session_id from the hook stdin payload as the binding key.** The MCP server's stdio protocol does not expose `session_id` — this scheme is workable for the hook but not for the MCP tool calls that need to mutate rooms.json. We need one binding key both code paths can compute, and PPID-walk gives us that.
+- **Per-process binding without a depth bound.** Defensive: a runaway loop (somehow `getppid()` keeps returning a non-init non-claude PID) would block forever. The 16-level cap is well above any plausible real-world process tree and bails cleanly.
+- **Kill `cc_join_room` and require the human to run `cc-connect accept <ticket>` directly.** Loses the natural conversational flow ("hey Claude, join the room <ticket>"). The pending-join + accept dance preserves it while keeping the human as the gate.
+
+Consequences. PROTOCOL.md §7.3 step 0 is rewritten in this release; pre-v0.6 implementations gating on `CC_CONNECT_ROOM` are non-conforming. The `~/.cc-connect/sessions/` and `~/.cc-connect/pending-joins/` directories are new persistent state and `cc-connect uninstall --purge` cleans them. SECURITY.md adds a row for "Consent gate on `cc_join_room`" and rewrites the "Cross-process Claude isolation" row.

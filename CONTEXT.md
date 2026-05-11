@@ -76,6 +76,18 @@ _Avoid_: inject, push.
 The prompt content Claude sees on a turn. Includes Injection output. Substrate flows into Context but Substrate ≠ Context.
 _Avoid_: prompt, history, memory.
 
+**Claude PID Binding** (v0.6+):
+The trust-boundary mechanism that ties one running Claude Code process to the Rooms its Peer has joined. The Hook and the MCP server each walk their parent process chain to find the `claude` ancestor's PID; that PID keys `~/.cc-connect/sessions/by-claude-pid/<pid>/rooms.json`. Replaces the pre-v0.6 `CC_CONNECT_ROOM` environment variable.
+_Avoid_: room env, room var, claude topic.
+
+**Consent gate** (v0.6+):
+The mandatory human approval step between `cc_join_room` (Claude requests a Room binding) and the Room actually appearing in that Claude's rooms.json. Defends against in-Room prompt-injection from coercing Claude into subscribing to a hostile Room.
+_Avoid_: handshake, approval.
+
+**Pending join** (v0.6+):
+A `cc_join_room` request awaiting the Consent gate. Persists at `~/.cc-connect/pending-joins/<token>.json` until either `cc-connect accept <token>` consumes it (binding the Room) or the human deletes it.
+_Avoid_: pending invite, pending request.
+
 ## Design intent (canonical phrasings)
 
 **Ambient awareness**:

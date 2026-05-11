@@ -1,0 +1,15 @@
+# MCP-first architecture: Claude drives Room lifecycle, not the embedded launcher
+
+Until v0.5, cc-connect embedded Claude. The TUI (`cc-connect-tui`) and the VSCode extension's Claude pane each spawned a `claude` child as part of the Room launcher and routed every Room interaction through that managed child. The substrate's "magic moment" — peer messages appearing in Claude's next prompt — depended on the launcher having set `CC_CONNECT_ROOM=<topic>` in the child's environment.
+
+In v0.6 we pivot to an MCP-first model. The user runs their own `claude` (in any terminal, in the VSCode-integrated Claude Code, in an external Claude Code session). cc-connect ships only the substrate: `cc-connect-mcp` exposes new room-lifecycle tools (`cc_create_room`, `cc_join_room`, `cc_leave_room`, `cc_list_rooms`, `cc_set_nick`) so Claude itself decides when to enter or leave a Room. The chat-substrate viewers — VSCode chat-only panel, CLI `cc-connect watch` — run as independent side-channel processes that do not interact with Claude Code's UI.
+
+We picked this over the embedded model for three reasons. First, the embedded launcher carried significant duplicative complexity: a Claude PTY in cc-connect-tui plus a Claude Agent SDK runner in the VSCode extension, each with their own permission-bubble UI, tool-card rendering, auto-greet bootstrap prompt, and lifecycle code (~3000 LOC TS + a dedicated TUI crate). Second, the embedded model bound cc-connect to a specific Claude-launching style; users who wanted Claude in a workflow we hadn't blessed (a different IDE, a remote session, a multiplexer pane) couldn't participate. Third, MCP-first cleanly separates "the substrate" from "the AI agent," matching the direction MCP itself is heading and leaving room for non-Claude clients to participate later through the same MCP surface.
+
+Rejected alternatives:
+
+- **Keep both modes** — embedded for power users, MCP-first for everyone else. Maintainers carry both code paths plus their interactions; we could not justify it.
+- **A2A compatibility** — express cc-connect as Google's Agent-to-Agent protocol. Different fit: A2A is point-to-point agent RPC, cc-connect is shared chat-as-substrate (gossip-replicated append-only log + hook injection). MCP-first does not preclude an A2A transport in the future.
+- **Drop the hook entirely** — make Claude poll for new chat lines via `cc_recent` after every prompt. Loses the ambient-awareness "magic moment"; the hook is what makes peer messages show up *without* Claude having to ask.
+
+Consequences. The trust-boundary mechanism changes from `CC_CONNECT_ROOM` env var to a Claude PID Binding (see ADR-0006); `cc-connect-tui` and the VSCode extension's Claude pane become legacy code that will be deprecated and then deleted across a release cycle. The `cc_wait_for_mention` MCP tool is removed in this release because it blocks the MCP stdio loop for up to 600s, which in MCP-first mode prevents Claude from making any other tool call during that window — incompatible with a Claude that's also being driven by a human. Replacement is the per-prompt hook injection plus on-demand `cc_recent`.
