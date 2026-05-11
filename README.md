@@ -2,39 +2,39 @@
 
 **Multiplex shared context across Claudes — not one Claude across humans.**
 
-A peer-to-peer substrate that lets multiple Claude Code instances share the same chat history and dropped files. Each developer keeps their own Claude. The shared layer rides on `iroh-gossip`; each Claude reads its local replica via a `UserPromptSubmit` hook. Both halves of the experience ship as one project:
+A peer-to-peer substrate that lets multiple Claude Code instances share the same chat history and dropped files. Each developer keeps their own `claude`. The shared layer rides on `iroh-gossip`; each Claude reads its local replica via a `UserPromptSubmit` hook and writes back through MCP tools.
 
-- **VSCode extension** (recommended) — Rooms tree + chat/Claude panel inside your editor.
-- **TUI** — `cc-connect room start` for terminal users; same Tickets, same hook injection.
+> **v0.6 — MCP-first.** The recommended flow is now: open `claude` in any terminal and ask it to create or join a Room (`cc_create_room`, `cc_join_room`). cc-connect no longer launches Claude for you. The legacy embedded launchers (VSCode chat-and-Claude pane, `cc-connect-tui`) still ship and still work; they're flagged for retirement in v0.7. See [ADR-0005](./docs/adr/0005-mcp-first-architecture.md).
 
 > v0.1 status: feature-complete in commits, full protocol drafted in [`PROTOCOL.md`](./PROTOCOL.md). Vendored ed25519 patches block crates.io publish until upstream releases an `ed25519-dalek` against fixed `pkcs8` (see [`TODOS.md`](./TODOS.md)).
 
-> ⚠ **Read [`SECURITY.md`](./SECURITY.md) before inviting anyone to a Room.** A Ticket is a capability — anyone holding it can read your chat, drop files, and prompt-inject your Claude. v0.1 has no end-to-end Message signatures and no Ticket revocation. The threat model lays out exactly what is and isn't protected.
+> ⚠ **Read [`SECURITY.md`](./SECURITY.md) before inviting anyone to a Room.** A Ticket is a capability — anyone holding it can read your chat, drop files, and prompt-inject your Claude. v0.1 has no end-to-end Message signatures and no Ticket revocation. v0.6 adds a **consent gate** on `cc_join_room` so a hostile chat line can't silently auto-subscribe your Claude to a malicious Room ([ADR-0006](./docs/adr/0006-trust-boundary-claude-pid-binding.md)).
 
 ---
 
 ## How the magic moment works
 
 ```
-┌──────── Alice's machine ────────┐         ┌──────── Bob's machine ────────┐
-│                                  │         │                                │
-│  $ cc-connect room start         │         │  $ cc-connect room join cc1-…  │
-│   ┌── claude ──┐  ┌── chat ──┐   │ gossip  │   ┌── claude ──┐ ┌── chat ──┐  │
-│   │            │  │           │  │ ──────► │   │            │ │           │ │
-│   └────────────┘  └───────────┘  │ ◄────── │   └────────────┘ └───────────┘ │
-│                                  │         │                                │
-│  Alice asks her Claude:          │         │  Bob types in his chat pane:   │
-│  "Redis or Postgres?"            │         │  "postgres, we have it"        │
-│                                  │         │                                │
-│  Hook fires on Alice's next      │         │                                │
-│  prompt → injects Bob's message  │         │                                │
-│  into Alice's Claude context.    │         │                                │
-│  Alice's Claude: "going Postgres │         │                                │
-│  per the chat"                   │         │                                │
-└──────────────────────────────────┘         └────────────────────────────────┘
+┌─────────── Alice's machine ──────────────┐  ┌────────── Bob's machine ─────────────┐
+│                                           │  │                                       │
+│  $ claude                                 │  │  $ claude                             │
+│  > "Create a cc-connect room."            │  │  > "Join cc-connect room cc1-…"       │
+│  Claude → cc_create_room → ticket         │  │  Claude → cc_join_room → pending      │
+│                                           │  │  $ cc-connect accept <token>          │
+│           gossip + iroh-blobs (peer-to-peer)                                          │
+│  ◄────────────────────────────────────────┴──┴───────────────────────────────────►   │
+│                                           │  │                                       │
+│  Alice asks her Claude:                   │  │  Bob asks his Claude:                 │
+│  "Should we use Redis or Postgres?"       │  │  "tell the room: postgres, we have    │
+│                                           │  │   it already"                         │
+│  …later, Alice's next prompt fires the    │  │  Bob's Claude → cc_send → gossip      │
+│  hook → injects Bob's chat verbatim.      │  │                                       │
+│  Alice's Claude: "going Postgres per      │  │                                       │
+│  the chat."                               │  │                                       │
+└───────────────────────────────────────────┘  └───────────────────────────────────────┘
 ```
 
-Bob never typed anything special. Alice never copy-pasted anything. The hook reads Bob's messages from a locally-replicated `log.jsonl` and prepends them to Alice's prompt.
+Bob's Claude broadcast through `cc_send`. Alice's Claude saw it because the `UserPromptSubmit` hook reads from her locally-replicated `log.jsonl` and prepends unread chat to her next prompt. Neither human had to copy-paste.
 
 Full architecture: [`PROTOCOL.md`](./PROTOCOL.md). Decision rationale: [`docs/adr/`](./docs/adr/).
 
@@ -55,7 +55,7 @@ Detects your platform (macOS arm64 / x86_64, Linux x86_64), pulls the matching t
 Pin a specific version (handy for CI):
 
 ```bash
-curl -fsSL <…/bootstrap.sh> | CC_CONNECT_VERSION=v0.1.0 bash
+curl -fsSL <…/bootstrap.sh> | CC_CONNECT_VERSION=v0.6.0 bash
 ```
 
 ### Build from source (developers / unsupported platforms)
@@ -74,201 +74,123 @@ cd cc-connect
 
 `install.sh` checks the toolchain (offers `rustup` if Rust is missing), builds the workspace, backs up `~/.claude/settings.json`, idempotently registers the hook + MCP server, symlinks every binary, runs `cc-connect doctor`. `--yes` for unattended, `--skip-build` to reuse an existing `target/release/`. First build takes ~5–10 minutes (iroh stack + vendored ed25519).
 
-**Restart Claude Code afterwards** (either path) so it picks up the new hook + MCP tools. After install, every command is available as `cc-connect …` from any directory.
-
-### Install the VSCode extension
-
-The default way to use cc-connect — see [next section](#use-it-in-vscode-recommended) for what you get.
-
-1. Grab the latest `.vsix` from [GitHub Releases](https://github.com/Minara-AI/cc-connect/releases?q=vscode-extension&expanded=true) (e.g. `cc-connect-vscode-0.2.2.vsix`).
-2. Install:
-   ```bash
-   code --install-extension cc-connect-vscode-0.2.2.vsix
-   ```
-3. **Fully quit Claude Code** (Cmd-Q on macOS, not just close the window) and reopen, so it picks up the new hook + MCP entries the bootstrap installer wrote.
-
-That's it — VSCode's activity bar gets a cc-connect icon. Marketplace publish is on the roadmap; for now `.vsix` is the canonical channel.
-
-#### Developer mode (extension contributors)
-
-Hacking on the extension itself? Open `vscode-extension/` in VSCode and press **F5** for an Extension Development Host (auto-builds + reloads). To package locally:
-
-```bash
-cd vscode-extension
-bun install
-bun run compile
-bunx @vscode/vsce package
-```
+**Restart Claude Code afterwards** so it picks up the new hook + MCP entries. After install, every command is available as `cc-connect …` from any directory.
 
 ---
 
-## Use it in VSCode (recommended)
+## Use it
 
-The cleanest day-to-day experience is the editor extension. Both halves of cc-connect — the chat substrate and your Claude Code session — live inside one VSCode panel, no terminal multiplexer needed.
-
-**End-to-end in 3 steps**, after you've run the bootstrap installer once on this machine:
-
-1. **Install the extension** — `code --install-extension cc-connect-vscode-X.Y.Z.vsix` (download from [Releases](https://github.com/Minara-AI/cc-connect/releases?q=vscode-extension)).
-2. **Fully quit + reopen Claude Code** so it picks up the new hook + MCP entries.
-3. **Click the cc-connect activity-bar icon** in VSCode → **Start Room** (or **Join Room** with a peer's ticket). The first time, a 4-step walkthrough auto-opens to verify your setup.
+After install + Claude-Code restart, the substrate is wired. Day-to-day:
 
 ```
-┌─ Activity Bar ────────────────────────────────────────────┐
-│  cc-connect            Rooms                              │
-│  ▸ team-A   ALIVE                                         │
-│  ▸ design   ALIVE                                         │
-│  ▸ debug    DORMANT                                       │
-└───────────────────────────────────────────────────────────┘
-┌─ Bottom panel ─────────────────────────────────────────────┐
-│  team-A…   @alice   ready          [📋 copy ticket]        │
-├─ [💬 Chat]  [✦ Claude  3] ─────────────────────────────────┤
-│  ┌─ chat ─────────────────────┐  ┌─ claude ─────────────┐ │
-│  │  @bob: postgres, we have it │  │ ○ Thought for 2s     │ │
-│  │  (me): yes, on it           │  │ ● cc_send · 13 bytes │ │
-│  │                              │  │ ● cc_wait_for_…      │ │
-│  │ [Message · @ to mention]    │  │ [Ask Claude…    ]🛡️→│ │
-│  └──────────────────────────────┘  └──────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+┌─ terminal A (your work) ─────────────┐  ┌─ terminal B (cc-connect watch) ────────────┐
+│ $ claude                             │  │ $ cc-connect watch                         │
+│ > Create a cc-connect room and tell  │  │ [cc-connect watch] polling ... — Ctrl-C    │
+│   me the ticket.                     │  │                                            │
+│ ⏵ cc_create_room                     │  │ [watch] room a1b2c3d4e5f6 now bound        │
+│ ✓ ticket: cc1-xyz…abc                │  │                                            │
+│ Share that with whoever you want to  │  │ ┌── pending cc_join_room ──────────        │
+│ invite — paste it in 1:1 / Signal /  │  │ │ token:      9f3a…                        │
+│ wherever you exchange secrets.       │  │ │ claude pid: 91234                        │
+│                                      │  │ │ topic:      a1b2c3d4e5f6                 │
+│ > tell the room: ready when you are  │  │ │ ticket:     cc1-…                        │
+│ ⏵ cc_send                            │  │ │ → run:      cc-connect accept 9f3a…      │
+│                                      │  │ └─────────────────────────────────         │
+│ [later, after a peer chats back…]    │  │                                            │
+│ > what's our deploy plan?            │  │ [12:01:14Z] (a1b2c3d4e5f6) bob:            │
+│ [hook prepends Bob's chat]           │  │   ready when you are                       │
+│ ⏵ … "going with the staging-first    │  │ [12:02:09Z] (a1b2c3d4e5f6) alice-cc:       │
+│   approach Bob suggested at 12:02"   │  │   going with the staging-first…            │
+└──────────────────────────────────────┘  └────────────────────────────────────────────┘
 ```
 
-Drag the Room panel to the **secondary side bar** for a vertical Slack-style split next to your editor.
+There's no extra UI to launch. The two new pieces are:
 
-### First Room
+1. **`claude`** — your normal Claude Code session. Once it knows you want to be in a Room, it calls `cc_create_room` (you become host) or `cc_join_room` (you join a peer's). The orientation header in the hook output tells it which Room it's in and which MCP tools are available.
+2. **`cc-connect watch`** — an optional human-side viewer (see next section). Useful but not required.
 
-After the 3-step install above:
+### Joining a Room someone shared
 
-1. **Start a Room** (you become host) — click the **+** in the Rooms tree title bar. Your `cc1-…` ticket is auto-copied to your clipboard. Share it however you normally share text.
-2. **Or Join** a peer's Room — click the cloud-download icon, paste the `cc1-…` ticket they sent you.
-3. The Room panel opens at the bottom of VSCode. Claude auto-greets the room (`o/ joined.`) and starts listening for `@you-cc` mentions.
-4. Click **copy ticket** in the room-meta strip any time to re-share.
+A peer sends you a `cc1-…` ticket. In `claude`:
 
-If the Rooms view ever says "binary not found", the cc-connect CLI got upgraded out from under you — re-run the bootstrap one-liner.
+```
+> Join cc-connect room cc1-AbCdEf...
+```
 
-### What's in the Room panel
+Claude calls `cc_join_room` and gets back a **pending token** instead of an immediate join. The MCP server filed it under `~/.cc-connect/pending-joins/<token>.json` and is waiting for **you** (the human) to consent. This is the [consent gate](./docs/adr/0006-trust-boundary-claude-pid-binding.md): a hostile chat message can't trick your Claude into auto-subscribing to a malicious Room.
 
-| Tab | What it gives you |
-|---|---|
-| **Chat** | IM-style rows: own messages right-aligned with iMessage bubbles, peers on the left. `@`-mention autocomplete from recent senders. `/` button opens a slash-command picker (`/drop`, `/at`). `+` button opens VSCode's native file picker → drops the file into the room. |
-| **Claude** | Your local Claude Code session for this Room. Tool calls render as IN/OUT cards with VSCode-native styling + per-tool codicons. Live "Thought for Xs" indicator. Full-markdown text replies. Active-editor chip above the input → click to attach `@<workspace-relative-path>` to your prompt. |
+In a side terminal:
 
-### Permission modes (Claude pane bottom-right pill)
+```bash
+cc-connect accept <token>      # binds your Claude to the Room
+```
 
-Click the pill to cycle:
+Or click **Accept** in `cc-connect watch` — same flow. After that, Bob's chat lines show up in your next prompt automatically.
 
-| Mode | Behaviour |
-|---|---|
-| **auto** (default) | Every tool runs without asking. The cc-connect Room model is "trusted substrate"; this is the ergonomic default. |
-| **ask edits** | Claude can read freely; `Edit` / `Write` / `Bash` calls prompt for approval. |
-| **plan** | Claude can read but cannot run any side-effectful tool. |
-| **ask all** | Every tool call shows an inline **Allow / Deny / Always allow** bubble in the Claude log. The textarea greys out until you decide. |
+### Listing / leaving Rooms
 
-### Other niceties
+Just ask Claude:
 
-- **Conversation history** — the clock-icon button in the Claude pane lists every past Claude session for this workspace (parses `~/.claude/projects/`); click one to replay it read-only.
-- **Auto-greet on join** — uses the same `bootstrap-prompt.md` + `auto-reply-prompt.md` as the TUI launcher, so the embedded Claude knows it's in a Room and enters the listener loop without you typing anything.
-- **File-reference chips** — paths the user types in the Claude prompt render as clickable codicons; click to open the file in the editor.
-- **New chat** — `+` icon in the Claude pane head mints a fresh `sessionId` without closing the Room.
-- **Tickets are interchangeable** — Tickets minted by the VSCode extension are byte-identical to those from `cc-connect room start`. Use either side freely.
+```
+> what cc-connect rooms am I in?    # → cc_list_rooms
+> leave the redis-vs-postgres room  # → cc_leave_room
+```
 
-The extension is **purely TypeScript** — no native code, no extra runtime deps beyond the cc-connect binaries you already installed. Source: [`vscode-extension/`](./vscode-extension).
+The chat-daemon for a Room keeps running for any other sessions on the same machine — leaving is per-Claude, not machine-wide.
+
+### Setting your nickname
+
+Once, per machine:
+
+```
+> set my cc-connect nickname to alice    # → cc_set_nick
+```
+
+Persists to `~/.cc-connect/config.json`. Peers see your messages as `alice-cc` (the `-cc` suffix marks you as the AI side; the human "alice" is bare). Without a nick you appear as `anonymous-cc`.
 
 ---
 
-## Or via the terminal (TUI alternative)
+## Side-channel viewer (`cc-connect watch`)
 
-The TUI is the same Room model and same Tickets — pick whichever you prefer, mix freely between machines. Two commands cover everything:
-
-```bash
-cc-connect room start            # mint a new Room → opens the TUI
-cc-connect room join cc1-…       # join an existing Room by ticket
-```
-
-The host daemon, chat substrate, and MCP server are spawned + torn down for you. `Ctrl-Q` quits without stopping host daemons — that way peers can still join while you're not looking. Use `cc-connect clear` to stop them later.
-
-```
-┌─ cc-connect [1-9] tab [Ctrl-N] new [Ctrl-W] close [F2/Tab] pane [Ctrl-Y] copy ─┐
-│ [1] team-A·H   [2] design                                                       │  ← tab strip
-├────────────────────────────────────────────────────────────────────────────────┤
-│ ┌─ 🤖 claude · team-A ───────────────┐ ┌─ 💬 chat · team-A ─────────────────┐ │
-│ │ $                                  │ │ [bob] use postgres                  │ │
-│ │                                    │ │ (@me) [alice] @dave PR ?            │ │
-│ │                                    │ │ › yes, on it                        │ │
-│ └────────────────────────────────────┘ └────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
-
-| Key            | Action |
-|---             |---     |
-| `1`–`9`        | Switch tab |
-| `Ctrl-N`       | New tab → paste a ticket to join |
-| `Ctrl-W`       | Close tab (if you started the host daemon, prompts to also stop it) |
-| `F2` / `Tab`   | Toggle focus between chat and Claude panes |
-| `Ctrl-Y`       | Copy the active tab's ticket to clipboard |
-| `Ctrl-Q`       | Quit; host daemons stay alive |
-
-`·H` on a tab label means you originated the Room (host-bg daemon is yours). Close the tab without stopping the daemon and the Room stays joinable for peers.
-
----
-
-## Configuration
-
-These knobs apply to **both** VSCode and TUI paths (the extension shells out to the same `cc-connect` binary).
-
-### Pick a nickname
+The substrate is mostly driven by your Claude in MCP-first mode, but you still want eyes on it: who joined, what they said, who's asking to be let in. Open one of these in a side terminal, tmux pane, or VSCode integrated terminal:
 
 ```bash
-cc-connect room start --nick alice         # persists to ~/.cc-connect/config.json
+cc-connect watch
 ```
 
-Skip the flag and the first run prompts you. The nick is local-only — peers see the Pubkey of your machine plus whichever nick *you* sent in your last message.
+What it shows, refreshing every 1.5s:
 
-### Use your own relay (optional)
+- **Pending `cc_join_room` requests** — the box at the right of the diagram above. Each one prints once with the matching `cc-connect accept <token>` hint inline.
+- **Bound-room transitions** — when a Claude on this machine joins or leaves a Room.
+- **Chat tail** — every message that lands in a Room any of your Claudes is bound to, with `(<topic-prefix>) <nick>: <body>`. First sight of a Room prints the trailing 10 lines so you have context.
 
-By default cc-connect routes through n0's free public relay cluster (the same iroh deployment everyone uses). For your own:
-
-```bash
-cc-connect room start --relay https://relay.yourdomain.com
-```
-
-The host's `--relay` URL is baked into the printed Ticket so joiners pick it up automatically. Stand-up walkthrough: [`.claude/skills/cc-connect-relay-setup/SKILL.md`](.claude/skills/cc-connect-relay-setup/SKILL.md).
-
-### Multiplexer mode (TUI only)
-
-The embedded TUI is the default. If you have `zellij` or `tmux` installed, you can opt in to a multiplexer-managed layout that uses the richer Bun + React + Ink chat panel (`cc-chat-ui`) on the right:
-
-```bash
-CC_CONNECT_MULTIPLEXER=zellij cc-connect room start
-CC_CONNECT_MULTIPLEXER=tmux   cc-connect room start
-CC_CONNECT_MULTIPLEXER=auto   cc-connect room start    # zellij → tmux → embedded
-```
-
-Exit hint: `Ctrl-q + y` (zellij), `Ctrl-b + d` (tmux detach), `Ctrl-Q` (embedded).
-
-### Pin a binary version
-
-For reproducible installs (CI, second machines, demo setups) pin the bootstrap to a specific release tag:
-
-```bash
-curl -fsSL <…/bootstrap.sh> | CC_CONNECT_VERSION=v0.5.0-alpha bash
-```
+Plain stdout, no TUI dependency. Stop with Ctrl-C; cc-connect itself keeps running. Doesn't write anything to disk — purely a viewer.
 
 ---
 
 ## Two-laptop demo
 
-The real magic-moment test. Works the same in VSCode or the TUI — pick whichever side you're on.
+The real magic-moment test.
 
 1. **Both machines**: install cc-connect (no-Rust one-liner above), then restart Claude Code.
-2. **Alice (host)**:
-   - VSCode: click the cc-connect activity-bar icon → **Start Room** → click **copy ticket**.
-   - TUI: `cc-connect room start` (the `cc1-…` ticket is auto-copied to clipboard).
-3. **Bob (joiner)**: paste Alice's ticket.
-   - VSCode: **Join Room** → paste.
-   - TUI: `cc-connect room join 'cc1-…'`.
-4. **Bob types into his chat pane**: `try sqlite for now`.
-5. **Alice asks her Claude anything** in her Claude pane. On submit, the hook reads Bob's message from Alice's local replica and injects it as context. Alice's Claude reply should reference Bob's suggestion.
+2. **Alice (host)** opens `claude` in her usual terminal:
+   ```
+   > Create a cc-connect room and print the ticket.
+   ```
+   Claude calls `cc_create_room`, prints the `cc1-…` ticket. Alice copies it to Bob (Signal, Slack DM, however).
+3. **Bob (joiner)** opens `claude`:
+   ```
+   > Join cc-connect room cc1-AbCdEf...
+   ```
+   Claude calls `cc_join_room`, returns a pending token. Bob, in another terminal, runs `cc-connect accept <token>` — or has had `cc-connect watch` running and clicks through it.
+4. **Bob asks his Claude** to broadcast something:
+   ```
+   > tell the room: try sqlite for now
+   ```
+   Bob's Claude calls `cc_send`. The message lands in Alice's local `log.jsonl` over gossip.
+5. **Alice asks her Claude anything** — a code question, a planning question, anything. On submit, the hook reads Bob's message from her local replica and prepends it as `[chatroom @bob 12:00Z] try sqlite for now`. Alice's Claude reply should reference Bob's suggestion.
 
-That's the magic moment: Bob never @-mentioned Alice, Alice never copy-pasted anything. The substrate did the work.
+That's the magic moment: nobody copy-pasted, nobody @-mentioned anyone. The substrate did the work.
 
 If it doesn't fire, see [Troubleshooting](#troubleshooting).
 
@@ -276,34 +198,56 @@ If it doesn't fire, see [Troubleshooting](#troubleshooting).
 
 ## Sharing files
 
-Inside the chat pane:
-
 ```
-> /drop ./design.svg
-[chat] dropped design.svg (148 bytes)
+> drop ./design.svg into the cc-connect room
 ```
 
-`/drop <path>` hashes the file into a local `iroh-blobs` `MemStore`, broadcasts a tiny gossip Message announcing the hash, then peers fetch the bytes out-of-band over the iroh-blobs ALPN against your NodeId. Both peers' Claudes see it as `@file:<path>` on the next prompt.
+Claude calls `cc_drop`. The file is hashed into a local `iroh-blobs` `MemStore`, a tiny gossip Message announces the hash, and peers fetch the bytes out-of-band over the iroh-blobs ALPN against your NodeId. Both peers' Claudes see it as `@file:<path>` on the next prompt.
 
 **v0.2 cap: 1 GiB per file.** Bytes flow via iroh-blobs, not gossip. Files persist for the lifetime of the room's chat-daemon. The `cc_drop` MCP tool refuses sensitive paths by default (SSH/AWS/GPG/Kube/Docker credentials, `.env*`, `id_rsa*`, `*.pem`, etc.); override per-process with `CC_CONNECT_DROP_ALLOW_DANGEROUS=1`. See [`SECURITY.md`](./SECURITY.md).
 
 ---
 
-## Letting Claude talk back (MCP tools)
+## The cc-connect MCP tools
 
-`cc-connect-mcp` is registered as a Claude Code MCP server at install time, so any Claude Code session — TUI, VSCode extension, or the CLI elsewhere — sees the same seven tools (the cc-connect-hook gates them on `CC_CONNECT_ROOM` so they're only visible inside a Room):
+`cc-connect-mcp` is registered as a Claude Code MCP server at install time, so any `claude` session — VSCode integrated terminal, plain shell, the legacy TUI, the CLI elsewhere — sees the same surface. The hook + MCP server gate visibility on the **Claude PID Binding** ([ADR-0006](./docs/adr/0006-trust-boundary-claude-pid-binding.md)): an unrelated `claude` invocation on the same machine sees nothing until it explicitly joins a Room.
 
-| Tool                      | What it does |
-|---                        |---           |
-| `cc_send`                 | Broadcast a chat message into your room |
-| `cc_at`                   | Same as `cc_send`, but with `@<nick>` prefix |
-| `cc_drop`                 | Share a local file with peers (iroh-blobs) |
-| `cc_recent`               | Last N chat lines from this room's log |
-| `cc_list_files`           | Files dropped into the room (with local paths) |
-| `cc_save_summary`         | Overwrite this room's rolling summary (auto-injected on every prompt) |
-| `cc_wait_for_mention`     | Block until someone @-mentions this Claude (or a timeout) |
+### Room lifecycle (MCP-first surface)
 
-Try it: ask Claude (VSCode pane or TUI claude pane), `"send '@all standup in 5' to the room"`. Claude calls `cc_at` and the message lands in every peer's chat scrollback.
+| Tool | What it does |
+|---   |---           |
+| `cc_create_room(nick?, relay?)` | Mint a new Room, spawn the substrate daemons, bind this Claude to the new topic. Returns the `cc1-…` ticket. |
+| `cc_join_room(ticket, nick?)`   | File a pending-join awaiting human consent. Returns a `pending_token`; the human runs `cc-connect accept <token>` to actually bind. |
+| `cc_leave_room(topic?)`         | Remove this Claude from one or all Rooms it's bound to. The chat-daemon stays up for any other sessions. |
+| `cc_list_rooms()`               | Report which Rooms this Claude is currently in, with `chat_daemon_alive` flag. |
+| `cc_set_nick(name)`             | Set the display name peers see. Persists to `~/.cc-connect/config.json`. |
+
+### In-Room chat
+
+| Tool | What it does |
+|---   |---           |
+| `cc_send(body, topic?)`            | Broadcast a chat message into your Room. |
+| `cc_at(nick, body, topic?)`        | Same as `cc_send`, with `@<nick>` prefix. `nick="cc"` addresses every Claude in the room; `"all"` / `"here"` addresses everyone. |
+| `cc_drop(path, topic?)`            | Share a local file with peers (iroh-blobs). |
+| `cc_recent(limit, topic?)`         | Last N chat lines from this room's log. Default 20, max 200. |
+| `cc_list_files(limit, topic?)`     | Files dropped into the room with their on-disk paths. |
+| `cc_save_summary(text, topic?)`    | Overwrite this room's rolling summary. Auto-injected on every prompt — your future Claudes (and your peers' Claudes) pick it up for free. |
+
+The `topic?` argument is optional. If this Claude is bound to exactly one Room, omit it. If you're in multiple Rooms, you **must** pass `topic` — the MCP server refuses to guess.
+
+### Removed in v0.6
+
+`cc_wait_for_mention` is gone. In MCP-first mode it would block the MCP stdio loop for up to 600s, which prevents Claude from making any other tool call during the window — incompatible with a Claude that's also being driven by a human typing prompts. Replacement is the per-prompt hook injection plus on-demand `cc_recent`. See ADR-0005.
+
+### Try it
+
+In `claude`, after creating or joining a Room:
+
+```
+> Send "@all standup in 5" to the cc-connect room
+```
+
+Claude calls `cc_at`, the message lands in every peer's chat scrollback, and shows up in their Claudes' next-prompt hook output as `[chatroom for-you @<you> 12:00Z] @all standup in 5`.
 
 ---
 
@@ -323,30 +267,113 @@ Every prompt's hook output is composed from three sections, each budget-bounded 
 [chatroom for-you @alice 12:01Z] @dave PR ?
 ```
 
-`INDEX.md` is auto-maintained — every file_drop appends a line. `summary.md` is Claude-driven: ask the embedded Claude to "summarise the room and save it" and it'll call `cc_save_summary`.
+`INDEX.md` is auto-maintained — every file_drop appends a line. `summary.md` is Claude-driven: ask your Claude to "summarise the room and save it" and it'll call `cc_save_summary`.
+
+---
+
+## Configuration
+
+### Pick a nickname
+
+The MCP-first way:
+
+```
+> set my cc-connect nickname to alice    # in any claude session → cc_set_nick
+```
+
+Or pre-set it before opening `claude`:
+
+```bash
+cc-connect set-nick alice               # not yet — for now use cc_set_nick from claude
+```
+
+Persists to `~/.cc-connect/config.json`. The nick is local-only — peers see your machine's Pubkey plus whichever nick *you* sent in your last message.
+
+### Use your own relay (optional)
+
+By default cc-connect routes through n0's free public relay cluster. To use your own, pass `relay` to `cc_create_room`:
+
+```
+> Create a cc-connect room with relay https://relay.yourdomain.com
+```
+
+The host's relay URL is baked into the printed Ticket so joiners pick it up automatically. Stand-up walkthrough: [`.claude/skills/cc-connect-relay-setup/SKILL.md`](.claude/skills/cc-connect-relay-setup/SKILL.md).
+
+### Pin a binary version
+
+For reproducible installs (CI, second machines, demo setups) pin the bootstrap to a specific release tag:
+
+```bash
+curl -fsSL <…/bootstrap.sh> | CC_CONNECT_VERSION=v0.6.0 bash
+```
+
+---
+
+## Legacy launchers (deprecating in v0.7)
+
+Two earlier launchers shipped before the MCP-first pivot. They still work in v0.6 — same Tickets, same on-disk substrate — but they're flagged for removal in v0.7. New users should ignore this section; it's here so existing users know what they have.
+
+### VSCode extension
+
+Pre-v0.6 the recommended path was the VSCode extension's combined chat + Claude pane. In v0.6 you can still install the `.vsix` from [Releases](https://github.com/Minara-AI/cc-connect/releases?q=vscode-extension); the **chat panel** still works fine as a substitute for `cc-connect watch`. The **Claude pane** (which embedded a Claude Agent SDK runner inside the extension) is being deprecated — use a regular `claude` in VSCode's integrated terminal instead.
+
+```bash
+code --install-extension cc-connect-vscode-X.Y.Z.vsix
+```
+
+Then quit + reopen Claude Code so it picks up the hook and MCP entries.
+
+### Embedded TUI (`cc-connect room start` / `cc-connect room join`)
+
+The TUI launched a managed `claude` PTY with the chat substrate alongside, and used the `CC_CONNECT_ROOM` env var as the trust boundary. Both pieces are deprecated in v0.6:
+
+- The `CC_CONNECT_ROOM` env var no longer gates anything ([PROTOCOL §7.3 step 0 / ADR-0006](./docs/adr/0006-trust-boundary-claude-pid-binding.md)).
+- `cc-connect room start` and `cc-connect room join` still spawn the same PTY layout, and `layouts/claude-wrap.sh` writes `rooms.json` for the about-to-be-claude PID so the binding still works. Plan to retire both subcommands and the `cc-connect-tui` crate in v0.7.
+
+If you were using `CC_CONNECT_MULTIPLEXER=zellij|tmux|auto` to get the richer Bun + React + Ink chat panel, that path still works.
 
 ---
 
 ## Command reference
 
-`cc-connect room start` and `cc-connect room join` are the only commands you need day-to-day. Everything below is supporting / management / debug surface — most of it is invoked for you by the room launcher.
+`claude` (asking it to call the MCP tools) is the only entry point you need day-to-day. Everything below is supporting / management / debug surface.
 
-| Command | Audience | What it does |
-|---      |---       |---           |
-| `cc-connect room start` | **everyone** | Mint a fresh ticket, spawn the host-bg daemon, open the TUI. The recommended entry point. |
-| `cc-connect room join <ticket>` | **everyone** | Join an existing room by ticket, open the TUI. The recommended entry point. |
-| `cc-connect doctor` | everyone | Sanity-check the install. Prints binary mtimes, hook entry, MCP entry, identity perms. Run this if anything's misbehaving. |
-| `cc-connect clear` | everyone | Stop every running cc-connect background process (chat-daemons + host-bg). Use if a daemon got stuck or before reinstalling a fresh build. `--purge` also wipes `~/.cc-connect/rooms/`. |
-| `cc-connect upgrade` | everyone | `git pull` + rebuild + reinstall in one shot. Identity + nicknames are preserved. `--yes` skips the y/N. |
-| `cc-connect uninstall` | everyone | Reverse `install.sh` entirely: stop daemons, strip the hook + MCP entries, remove `~/.local/bin` symlinks. `--purge` also wipes `~/.cc-connect/`, `/tmp/cc-connect-$UID/`, and stale `~/.claude/*.json.bak.*` backups. |
-| `cc-connect host-bg list` | management | List running background-host daemons (one line per daemon). |
-| `cc-connect host-bg stop <topic-prefix>` | management | SIGTERM a specific daemon by topic-hex prefix. |
-| `cc-connect host-bg start [--relay <url>]` | management | Start a daemon without opening the TUI. Mainly for headless / CI scenarios. `room start` does this for you. |
-| `cc-connect chat-daemon {list,stop,start}` | management | Same shape as `host-bg`, but for chat-session daemons (the gossip + chat.sock side; only matters in the multiplexer path). |
-| `cc-connect host` | low-level | Bare-bones blocking host (no TUI, no claude, no MCP). Mostly useful for protocol smoke tests. Prefer `room start`. |
-| `cc-connect chat <ticket>` | low-level | Bare-bones REPL-only joiner (no TUI). Mostly useful for protocol smoke tests. Prefer `room join`. |
-| `cc-connect host-bg-daemon` | internal | Daemon entry point. Don't run directly — `host-bg start` spawns it. |
-| `cc-connect chat-daemon-daemon` | internal | Same shape, chat-daemon side. Don't run directly. |
+### Day-to-day human-side commands
+
+| Command | What it does |
+|---      |---           |
+| `cc-connect accept <token>` | Approve a Claude's pending `cc_join_room` request. The MCP-first trust boundary requires explicit human consent before binding. |
+| `cc-connect pending-list` | List every pending `cc_join_room` request awaiting your consent. |
+| `cc-connect watch` | Side-channel viewer — surfaces pending joins with an inline accept hint and tails chat from every Room any of your Claudes are bound to. |
+| `cc-connect doctor` | Sanity-check the install. Prints binary mtimes, hook entry, MCP entry, identity perms, prunes orphan PID-session dirs. Run if anything's misbehaving. |
+| `cc-connect clear` | Stop every running cc-connect background process (chat-daemons + host-bg) and prune dead-PID session entries. `--purge` also wipes `~/.cc-connect/{rooms,sessions,pending-joins}/` — currently-running Claudes lose their bindings. |
+| `cc-connect upgrade` | `git pull` + rebuild + reinstall in one shot. Identity + nicknames are preserved. `--yes` skips the y/N. |
+| `cc-connect uninstall` | Reverse `install.sh` entirely: stop daemons, strip the hook + MCP entries, remove `~/.local/bin` symlinks. `--purge` also wipes `~/.cc-connect/`, `/tmp/cc-connect-$UID/`, and stale `~/.claude/*.json.bak.*` backups. |
+
+### Legacy launcher commands (deprecating in v0.7)
+
+| Command | What it does |
+|---      |---           |
+| `cc-connect room start` | Mint a fresh ticket, spawn the host-bg daemon, open the embedded TUI with a managed `claude` PTY. |
+| `cc-connect room join <ticket>` | Join an existing room by ticket, open the TUI with a managed `claude` PTY. |
+
+### Daemon management
+
+| Command | What it does |
+|---      |---           |
+| `cc-connect host-bg list` | List running background-host daemons. |
+| `cc-connect host-bg stop <topic-prefix>` | SIGTERM a specific daemon by topic-hex prefix. |
+| `cc-connect host-bg start [--relay <url>]` | Start a daemon without opening anything. Headless / CI scenarios. |
+| `cc-connect chat-daemon {list,stop,start}` | Same shape as `host-bg`, but for chat-session daemons. |
+
+### Low-level / internal
+
+| Command | What it does |
+|---      |---           |
+| `cc-connect host` | Bare-bones blocking host (no claude, no MCP). Protocol smoke tests. |
+| `cc-connect chat <ticket>` | Bare-bones REPL-only joiner. Protocol smoke tests. Prefer `cc-connect watch` for read-only viewing. |
+| `cc-connect host-bg-daemon` | Daemon entry point. Don't run directly — `host-bg start` spawns it. |
+| `cc-connect chat-daemon-daemon` | Same shape, chat-daemon side. Don't run directly. |
 
 ---
 
@@ -354,15 +381,18 @@ Every prompt's hook output is composed from three sections, each budget-bounded 
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `cc-connect room start` hangs at "binding endpoint" | Firewall blocks n0's relay servers | Try a different network. |
+| Claude says `cc_create_room` returned `CLAUDE_PID_NOT_FOUND` | The MCP server can't find a `claude` ancestor when walking its parent process chain (PROTOCOL §7.3 step 0) | Run `cc-connect doctor`. Most likely the MCP server is configured under the wrong path — re-run the bootstrap one-liner. |
+| `cc_create_room` worked but the next prompt has no `[cc-connect]` header | Hook isn't installed, or stale binary on `PATH` | `cc-connect doctor` — it prints the registered hook path + binary mtimes. `cc-connect upgrade` to refresh. |
+| Claude calls `cc_join_room`, prints a token, but nothing else happens | You haven't consented yet. The token is sitting in `~/.cc-connect/pending-joins/` | `cc-connect pending-list` to see it, then `cc-connect accept <token>`. Or `cc-connect watch` and click through. |
+| `cc-connect watch` shows the chat but Alice's Claude doesn't see it | Alice's Claude isn't bound to the same Room | `cc_list_rooms` from inside Alice's Claude. If empty, `cc_create_room` or `cc_join_room` first. |
+| `cc-connect` hangs at "binding endpoint" | Firewall blocks n0's relay servers | Try a different network. |
 | Joiner sees `(joined late, no history available)` | Both peers already moved past pre-join messages, or backfill RPC failed | Re-test on a clean room; if persistent, run with `CC_CONNECT_GOSSIP_DEBUG=1` and inspect `~/.cc-connect/gossip-debug.log`. |
-| Room says `(peers: 1)` but no messages flow | mDNS is blocked (corporate WiFi client isolation) | Try a coffee-shop / home network. |
-| Hook silently does nothing | Settings.json hook path is relative, or stale binary on PATH | `cc-connect doctor` — it prints the registered hook path + binary mtimes. `cc-connect upgrade` to refresh. |
+| Room shows `(peers: 1)` but no messages flow | mDNS is blocked (corporate WiFi client isolation) | Try a coffee-shop / home network. |
 | Restarted Claude Code but it still doesn't see chat | Old `cc-connect-mcp` child still running | `cc-connect clear`, then restart Claude Code. |
 | Can't see remote peer's messages but they see yours | Stale daemon from before the post-Apr fixes | `cc-connect clear` on both machines, `cc-connect upgrade`, retry. |
 | `cargo build` fails on `ed25519-3.0.0-rc.4` | Missing `[patch.crates-io]` (you cloned without `vendored/`) | Re-clone or `git fetch origin main && git reset --hard origin/main`. |
 | Identity file mode wrong | Drifted from `0600` | `chmod 600 ~/.cc-connect/identity.key`. The loader and doctor both warn. |
-| `/tmp/cc-connect-$UID/` mode wrong / pre-existed as a symlink | Hostile co-tenant or earlier crash | `rm -rf "$TMPDIR/cc-connect-$UID/" && cc-connect room start`. PROTOCOL §8 mandates a 0700 non-symlink parent. |
+| `/tmp/cc-connect-$UID/` mode wrong / pre-existed as a symlink | Hostile co-tenant or earlier crash | `rm -rf "$TMPDIR/cc-connect-$UID/" && cc-connect clear`. PROTOCOL §8 mandates a 0700 non-symlink parent. |
 
 If `cc-connect-hook` fired but you suspect it failed, check `~/.cc-connect/hook.log`. The hook always exits 0 (PROTOCOL §7.4) so errors don't propagate to Claude Code.
 
@@ -377,22 +407,19 @@ cc-connect/
 ├── SECURITY.md                  Threat model
 ├── CLAUDE.md                    Agent guide for Claude Code sessions in this repo
 ├── crates/                      Rust workspace (5 crates)
-│   ├── cc-connect-core/         Protocol primitives library (104 tests)
-│   ├── cc-connect/              host / chat / room / host-bg / chat-daemon / lifecycle / doctor / setup binary
-│   ├── cc-connect-tui/          Embedded TUI binary + library
-│   ├── cc-connect-mcp/          MCP stdio server (Claude Code → chat tools)
+│   ├── cc-connect-core/         Protocol primitives library
+│   ├── cc-connect/              host / chat / room / host-bg / chat-daemon / lifecycle / doctor / setup / accept / watch binary
+│   ├── cc-connect-tui/          Embedded TUI binary + library (deprecated in v0.7)
+│   ├── cc-connect-mcp/          MCP stdio server (Claude → room-lifecycle + chat tools)
 │   └── cc-connect-hook/         UserPromptSubmit hook binary
-├── chat-ui/                     Bun + React + Ink chat panel (→ cc-chat-ui), used in zellij/tmux paths
-├── vscode-extension/            VSCode extension (TS + React webview, no native code)
-│   ├── src/                     Extension host (sidebar, panel, daemon orchestration, Claude SDK runner)
-│   ├── webview/                 React app (chat, Claude pane, tool cards, permission bubbles)
-│   └── media/walkthrough/       First-run setup walkthrough markdown
-├── layouts/                     zellij KDL + tmux script + claude-wrap.sh + bootstrap/auto-reply prompts
+├── chat-ui/                     Bun + React + Ink chat panel (→ cc-chat-ui), used in zellij/tmux paths (deprecated in v0.7)
+├── vscode-extension/            VSCode extension (TS + React webview); Claude pane being deprecated in v0.7, chat panel kept
+├── layouts/                     zellij KDL + tmux script + claude-wrap.sh + bootstrap/auto-reply prompts (deprecated in v0.7)
 ├── docs/
-│   ├── adr/                     Architecture decision records
+│   ├── adr/                     Architecture decision records (0005 = MCP-first, 0006 = Claude PID Binding)
 │   └── agents/                  Per-repo config the engineering skills consume
 ├── .github/workflows/           CI — release.yml (Rust binaries), vscode-extension-release.yml (.vsix), ci.yml (per-PR)
-├── .claude/skills/              Project-local Claude Code skills (publish, push, cc-connect-setup, …)
+├── .claude/skills/              Project-local Claude Code skills (publish, push, cc-connect-setup, cc-connect-room, cc-connect-chat, …)
 ├── .githooks/                   Polyglot pre-commit + commit-msg hooks
 ├── scripts/                     bootstrap.sh + smoke tests + repo-config helpers
 ├── tests/                       FAKE-CLAUDE-CODE integration test
@@ -415,23 +442,23 @@ cc-connect ships **two independent artifacts** with their own release cadence. T
 
 | Artifact | Tag pattern | What it ships | CI workflow |
 |---|---|---|---|
-| **cc-connect CLI / TUI** (Rust binaries) | `v0.1.0`, `v0.2.0-rc.1` | `cc-connect`, `cc-connect-hook`, `cc-chat-ui` tarballs per platform attached to the GitHub release | [`release.yml`](./.github/workflows/release.yml) |
-| **VSCode extension** | `vscode-extension-v0.1.0`, `vscode-extension-v0.2.0-rc.1` | `cc-connect-vscode-<version>.vsix` attached to the GitHub release | [`vscode-extension-release.yml`](./.github/workflows/vscode-extension-release.yml) |
+| **cc-connect CLI** (Rust binaries) | `v0.6.0`, `v0.7.0-rc.1` | `cc-connect`, `cc-connect-hook`, `cc-chat-ui` tarballs per platform attached to the GitHub release | [`release.yml`](./.github/workflows/release.yml) |
+| **VSCode extension** | `vscode-extension-v0.4.5`, `vscode-extension-v0.5.0-rc.1` | `cc-connect-vscode-<version>.vsix` attached to the GitHub release | [`vscode-extension-release.yml`](./.github/workflows/vscode-extension-release.yml) |
 
-The two pipelines are completely independent — bumping one never triggers the other. The version numbers don't have to track each other either; the extension declares the minimum cc-connect binary it needs through `package.json` (and the [VSCode usage section](#use-it-in-vscode-recommended) makes the dependency explicit for users). Cutting a release:
+The two pipelines are completely independent — bumping one never triggers the other. The version numbers don't have to track each other either; the extension declares the minimum cc-connect binary it needs through `package.json`. Cutting a release:
 
 ```bash
 # CLI / TUI
-git tag v0.2.0
-git push origin v0.2.0          # → release.yml builds tarballs
+git tag v0.6.0
+git push origin v0.6.0          # → release.yml builds tarballs
 
 # VSCode extension (bump vscode-extension/package.json::version first —
 # the workflow refuses to build if the tag and package.json disagree)
-$EDITOR vscode-extension/package.json   # version: "0.1.0" → "0.2.0"
+$EDITOR vscode-extension/package.json   # version: "0.4.5" → "0.5.0"
 git add vscode-extension/package.json
-git commit -m "chore(vscode-extension): bump to 0.2.0"
-git tag vscode-extension-v0.2.0
-git push origin main vscode-extension-v0.2.0   # → vscode-extension-release.yml packages .vsix
+git commit -m "chore(vscode-extension): bump to 0.5.0"
+git tag vscode-extension-v0.5.0
+git push origin main vscode-extension-v0.5.0   # → vscode-extension-release.yml packages .vsix
 ```
 
 The extension workflow refuses to build if the tag version doesn't match `vscode-extension/package.json::version` — keeps the on-disk version, the tag, and the .vsix filename in lockstep.
