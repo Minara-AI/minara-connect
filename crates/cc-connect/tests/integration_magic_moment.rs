@@ -1,22 +1,25 @@
-//! v0.1 release-gate integration test (PROTOCOL.md §11.4).
+//! Hook integration tests covering the parts of the magic-moment chain
+//! that don't require a fake `claude` parent process.
 //!
-//! Exercises the **magic-moment core** — the chain that takes a chat
-//! Message in a Room and surfaces it in Claude Code's prompt context —
-//! end-to-end, with the actual `cc-connect-hook` binary as a subprocess.
+//! v0.6 changed the trust boundary from the `CC_CONNECT_ROOM` env var
+//! to **Claude PID Binding** (PROTOCOL.md §7.3 step 0, ADR-0006). The
+//! hook now walks its parent process chain to find a `claude` ancestor
+//! and reads `~/.cc-connect/sessions/by-claude-pid/<pid>/rooms.json`.
+//! Tests that exercise the injection path therefore need a `claude`-named
+//! ancestor in the process tree, which `cargo test` doesn't naturally
+//! provide. The pre-v0.6 tests (`magic_moment_hook_emits_…`,
+//! `…skips_dead_pid_active_room_file`, `routing_with_env_var_scopes_…`)
+//! exercised the env-var path and were removed when that path was
+//! retired. Re-introducing equivalent coverage via a fake-`claude`
+//! helper binary is tracked as follow-up.
 //!
-//! Skipped from the loop:
-//!   - iroh transport (chat → gossip → log on the receiving peer):
-//!     stubbed out by writing the receiver's log.jsonl directly.
-//!     iroh integration is verified by the manual two-laptop smoke
-//!     test in the README. Adding a real two-peer iroh test here would
-//!     introduce network dependencies (relay, NAT) that don't belong
-//!     in `cargo test`.
-//!
-//! What this test *does* prove (the v0.1 release contract):
-//!   - PROTOCOL.md §7.3 steps 1-9 (hook flow) end-to-end.
-//!   - PROTOCOL.md §8 active-rooms PID semantics + sweep.
-//!   - PROTOCOL.md §9 cursor advance is atomic and lands at the right id.
-//!   - PROTOCOL.md §7.3 step 5 single-Room format string is byte-exact.
+//! What this test *still* proves:
+//!   - PROTOCOL.md §7.4: the hook always exits 0 even with no binding.
+//!   - The "no claude ancestor" no-op gate (the trust-boundary entry
+//!     point) — the hook produces empty stdout when the test runner
+//!     isn't a descendant of `claude`.
+//!   - Cursor read/no-advance behaviour when there are no unread
+//!     messages.
 
 use cc_connect_core::{log_io, message::Message};
 use std::io::Write;
@@ -31,77 +34,6 @@ const TEST_BODY: &str = "hello from the magic moment";
 const TEST_SESSION: &str = "test-session-001";
 // 64 lowercase hex chars = a 32-byte topic id of all zeros.
 const TEST_TOPIC_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-
-#[test]
-fn magic_moment_hook_emits_canonical_chatroom_line_and_advances_cursor() {
-    let env = TestEnv::setup();
-    env.seed_active_room_with_unread_message();
-
-    // Spawn cc-connect-hook with a UserPromptSubmit-style stdin payload.
-    let stdin_payload = format!(r#"{{"session_id":"{TEST_SESSION}"}}"#);
-    let mut child = Command::new(&env.hook_bin)
-        .env_clear()
-        .env("HOME", &env.home)
-        .env("TMPDIR", &env.tmpdir)
-        // v0.4.2-alpha env-gate: hook is a no-op without CC_CONNECT_ROOM.
-        .env("CC_CONNECT_ROOM", TEST_TOPIC_HEX)
-        .env(
-            "PATH",
-            std::env::var("PATH").unwrap_or_else(|_| String::new()),
-        )
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn cc-connect-hook");
-
-    child
-        .stdin
-        .as_mut()
-        .expect("hook stdin")
-        .write_all(stdin_payload.as_bytes())
-        .expect("write hook stdin");
-
-    let out = child.wait_with_output().expect("wait hook");
-
-    // PROTOCOL.md §7.4: hook MUST always exit 0.
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "hook MUST exit 0 (got {:?}); stderr: {}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // PROTOCOL.md §7.3 step 5 single-Room format:
-    //   `[chatroom @<nick> <hh:mm>Z] <body>\n`
-    // Without nicknames.json, nick falls back to the first 8 chars of the Pubkey.
-    let expected_tail = format!("[chatroom @{} 00:00Z] {}\n", &TEST_PUBKEY[..8], TEST_BODY);
-    let actual = String::from_utf8(out.stdout).expect("hook stdout is UTF-8");
-    assert!(
-        actual.ends_with(&expected_tail),
-        "hook stdout must end with the canonical single-Room chat line. got: {actual:?}"
-    );
-    assert!(
-        actual.starts_with("[cc-connect] active room context"),
-        "hook stdout must start with the orientation header. got: {actual:?}"
-    );
-
-    // PROTOCOL.md §9 + §7.3 step 8: cursor advanced atomically to the Message id.
-    let cursor_path = env
-        .home
-        .join(".cc-connect")
-        .join("cursors")
-        .join(TEST_TOPIC_HEX)
-        .join(format!("{TEST_SESSION}.cursor"));
-    let raw =
-        std::fs::read_to_string(&cursor_path).expect("cursor file must exist after hook fires");
-    assert_eq!(
-        raw.trim_end_matches('\n'),
-        TEST_MSG_ID,
-        "cursor MUST contain the Message id we just injected"
-    );
-}
 
 #[test]
 fn magic_moment_hook_emits_nothing_when_cursor_already_at_tail() {
@@ -144,103 +76,16 @@ fn magic_moment_hook_emits_nothing_when_cursor_already_at_tail() {
     );
 }
 
+/// Without a `claude` parent in the process tree, the hook MUST be a
+/// no-op even if active rooms exist on the machine. This is the v0.6
+/// Claude PID Binding contract (PROTOCOL.md §7.3 step 0): chat context
+/// only flows into Claude sessions whose owning Claude has a state
+/// file under `~/.cc-connect/sessions/by-claude-pid/<pid>/`. Any
+/// unrelated process invoking the hook stays blind to the substrate.
+/// The `cargo test` runner is by definition not a Claude descendant,
+/// so this test exercises the no-op gate directly.
 #[test]
-fn magic_moment_hook_skips_dead_pid_active_room_file() {
-    let env = TestEnv::setup_no_room();
-    // Drop a stale PID file from a long-dead PID (use 99999 — this far
-    // exceeds anything plausibly running, and falls in the valid-PID
-    // range we accept).
-    let active_dir = env.active_rooms_dir();
-    std::fs::create_dir_all(&active_dir).unwrap();
-    std::fs::set_permissions(&active_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let stale = active_dir.join(format!("{TEST_TOPIC_HEX}.active"));
-    std::fs::write(&stale, "99999").unwrap();
-
-    let out = Command::new(&env.hook_bin)
-        .env_clear()
-        .env("HOME", &env.home)
-        .env("TMPDIR", &env.tmpdir)
-        // v0.4.2-alpha env-gate: stale-PID sweep only runs when the hook
-        // has a topic to inject for, otherwise it bails before scanning.
-        .env("CC_CONNECT_ROOM", TEST_TOPIC_HEX)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut c| {
-            c.stdin
-                .as_mut()
-                .unwrap()
-                .write_all(format!(r#"{{"session_id":"{TEST_SESSION}"}}"#).as_bytes())?;
-            c.wait_with_output()
-        })
-        .expect("hook child");
-
-    assert_eq!(out.status.code(), Some(0));
-    assert!(out.stdout.is_empty(), "dead-PID room MUST NOT inject");
-    // The stale PID file should also be swept by the hook.
-    assert!(
-        !stale.exists(),
-        "stale .active file MUST be unlinked by the hook (PROTOCOL §8)"
-    );
-}
-
-/// CC_CONNECT_ROOM env routing: with two active rooms planted, the hook
-/// must inject ONLY the room whose topic matches the env var, and use the
-/// single-room prefix shape (no `<topic_short>` tag).
-#[test]
-fn routing_with_env_var_scopes_to_one_room() {
-    const TOPIC_A: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-    const TOPIC_B: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-    const ID_A: &str = "01HZA8K9F0RS3JXG7QZ4N5VTBA";
-    const ID_B: &str = "01HZA8K9F0RS3JXG7QZ4N5VTBB";
-    const BODY_A: &str = "from-room-A";
-    const BODY_B: &str = "from-room-B";
-
-    let env = TestEnv::setup_no_room();
-    env.seed_active_room(TOPIC_A, ID_A, BODY_A);
-    env.seed_active_room(TOPIC_B, ID_B, BODY_B);
-
-    let stdin_payload = format!(r#"{{"session_id":"{TEST_SESSION}"}}"#);
-    let out = Command::new(&env.hook_bin)
-        .env_clear()
-        .env("HOME", &env.home)
-        .env("TMPDIR", &env.tmpdir)
-        .env("CC_CONNECT_ROOM", TOPIC_A)
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut c| {
-            c.stdin
-                .as_mut()
-                .unwrap()
-                .write_all(stdin_payload.as_bytes())?;
-            c.wait_with_output()
-        })
-        .expect("hook child");
-
-    assert_eq!(out.status.code(), Some(0));
-    let stdout = String::from_utf8(out.stdout).expect("utf-8");
-    let expected_tail = format!("[chatroom @{} 00:00Z] {}\n", &TEST_PUBKEY[..8], BODY_A);
-    assert!(
-        stdout.ends_with(&expected_tail),
-        "CC_CONNECT_ROOM MUST scope to exactly one room with the single-room prefix; got: {stdout:?}"
-    );
-    assert!(
-        !stdout.contains(BODY_B),
-        "non-matching room MUST NOT appear in output"
-    );
-}
-
-/// Without `CC_CONNECT_ROOM` set, the hook MUST be a no-op even if active
-/// rooms exist on the machine. This is the v0.4.2-alpha gating contract:
-/// chat context only bleeds into Claude sessions explicitly bound by
-/// cc-connect-tui. Any unrelated `claude` process on the same box stays
-/// blind to the chat substrate.
-#[test]
-fn routing_without_env_var_is_a_noop() {
+fn hook_without_claude_ancestor_is_a_noop() {
     const TOPIC_A: &str = "3333333333333333333333333333333333333333333333333333333333333333";
     const TOPIC_B: &str = "4444444444444444444444444444444444444444444444444444444444444444";
     const ID_A: &str = "01HZA8K9F0RS3JXG7QZ4N5VTAA";
@@ -257,7 +102,6 @@ fn routing_without_env_var_is_a_noop() {
         .env_clear()
         .env("HOME", &env.home)
         .env("TMPDIR", &env.tmpdir)
-        // CC_CONNECT_ROOM intentionally NOT set.
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -275,7 +119,7 @@ fn routing_without_env_var_is_a_noop() {
     assert_eq!(out.status.code(), Some(0), "hook MUST exit 0");
     assert!(
         out.stdout.is_empty(),
-        "without CC_CONNECT_ROOM the hook MUST emit nothing; stdout was {:?}",
+        "without a `claude` ancestor the hook MUST emit nothing; stdout was {:?}",
         String::from_utf8_lossy(&out.stdout)
     );
 }
