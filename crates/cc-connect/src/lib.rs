@@ -5,6 +5,7 @@
 //! The thin `cc-connect` binary at `src/main.rs` is just a clap dispatcher
 //! over [`run`].
 
+pub mod accept;
 pub mod backfill;
 pub mod chat;
 pub mod chat_daemon;
@@ -143,6 +144,21 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Approve a Claude's pending `cc_join_room` request. The MCP-first
+    /// trust boundary (PROTOCOL.md §7.3 step 0) requires explicit human
+    /// consent before a Claude is bound to a room it asked to join. Get
+    /// the token from the Claude's `cc_join_room` response, from
+    /// `cc-connect pending-list`, or from the side-channel viewer
+    /// (`cc-connect watch`, the VSCode chat panel).
+    Accept {
+        /// Pending-join token, from `cc_join_room`'s response or
+        /// `cc-connect pending-list`.
+        token: String,
+    },
+    /// List every pending `cc_join_room` request awaiting human
+    /// consent. Use to audit what Claude has asked for, or to fish out
+    /// a token after dismissing the original `cc_join_room` reply.
+    PendingList,
 }
 
 #[derive(Subcommand)]
@@ -282,5 +298,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Clear { purge } => lifecycle::run_clear(purge),
         Command::Uninstall { purge } => lifecycle::run_uninstall(purge),
         Command::Upgrade { yes } => lifecycle::run_upgrade(yes),
+        Command::Accept { token } => accept::run_accept(&token),
+        Command::PendingList => accept::run_pending_list(),
     }
 }

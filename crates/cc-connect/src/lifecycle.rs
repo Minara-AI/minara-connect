@@ -82,6 +82,17 @@ pub fn run_clear(purge: bool) -> Result<()> {
 
     eprintln!("[clear] stopped {stopped} daemon(s)");
 
+    // GC orphaned `~/.cc-connect/sessions/by-claude-pid/<pid>/` dirs whose
+    // owning Claude exited without explicit `cc_leave_room`. Same prune
+    // the hook + MCP server run on startup; running it from `clear` keeps
+    // `cc-connect pending-list` and `cc-connect-mcp::cc_list_rooms`
+    // honest after a Claude crash. ADR-0006.
+    match cc_connect_core::session_state::prune_dead_pid_sessions() {
+        Ok(0) => {}
+        Ok(n) => eprintln!("[clear] pruned {n} dead-PID session entries"),
+        Err(e) => errors.push(format!("prune dead PID sessions: {e:#}")),
+    }
+
     if purge {
         let rooms_dir = home_dir().join(".cc-connect").join("rooms");
         if rooms_dir.exists() {
@@ -93,6 +104,28 @@ pub fn run_clear(purge: bool) -> Result<()> {
                 "[clear] no rooms directory at {} to purge",
                 rooms_dir.display()
             );
+        }
+        // Wipe the MCP-first per-Claude state. Equivalent to "every Claude
+        // window starts fresh after this command." Plain `clear` (no
+        // --purge) only prunes DEAD entries above; --purge wipes
+        // everything including live sessions, so currently-running
+        // Claudes lose their bound rooms — they'd need to re-call
+        // cc_create_room / cc_join_room.
+        let sessions_dir = home_dir().join(".cc-connect").join("sessions");
+        if sessions_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&sessions_dir) {
+                eprintln!("  warn: rm -rf {}: {e}", sessions_dir.display());
+            } else {
+                eprintln!("[clear] purged {}", sessions_dir.display());
+            }
+        }
+        let pending_dir = home_dir().join(".cc-connect").join("pending-joins");
+        if pending_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&pending_dir) {
+                eprintln!("  warn: rm -rf {}: {e}", pending_dir.display());
+            } else {
+                eprintln!("[clear] purged {}", pending_dir.display());
+            }
         }
         // Sweep the per-UID tmp tree in case a daemon was SIGKILL'd
         // and skipped its Drop-guard cleanup. See `purge_tmp_uid_dir`.
