@@ -22,6 +22,7 @@ pub fn run() -> Result<()> {
     let mut report = Report::default();
 
     print_self_info(&mut report);
+    check_upgrade_target(&mut report);
     check_identity(&mut report);
     check_active_rooms_dir(&mut report);
     check_settings_json_hook(&mut report);
@@ -55,6 +56,33 @@ fn print_self_info(report: &mut Report) {
         exe.display(),
         age
     ));
+}
+
+/// Surface whether `cc-connect upgrade` will be able to find a git
+/// checkout to pull. The historical bug: `~/.local/bin/cc-connect` is a
+/// symlink into the source tree, and `cc-connect upgrade` walked up
+/// from `~/.local/bin/` rather than the resolved target — so upgrade
+/// failed silently for every install built from source. Surfacing
+/// "upgrade target" here lets the user see at a glance whether
+/// `cc-connect upgrade` will work, or whether they're on a binary
+/// install (bootstrap.sh) where re-running bootstrap.sh is the way.
+fn check_upgrade_target(report: &mut Report) {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    match crate::lifecycle::locate_install_repo_from(&exe) {
+        Ok(repo) => {
+            report.ok(&format!("cc-connect upgrade target: {}", repo.display()));
+        }
+        Err(_) => {
+            report.info(
+                "no git checkout above this binary — `cc-connect upgrade` won't work. \
+                 If you installed via bootstrap.sh, re-run it to upgrade; otherwise \
+                 `git pull && ./install.sh` from inside the clone.",
+            );
+        }
+    }
 }
 
 /// `mtime` of `path` rendered as a coarse "Ns/m/h/d ago" string, or
