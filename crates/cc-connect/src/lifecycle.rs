@@ -359,9 +359,23 @@ pub fn run_upgrade(yes: bool) -> Result<()> {
 /// `.git` directory. Errors if none found within 6 levels.
 fn locate_install_repo() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("current_exe")?;
-    let mut dir = exe
+    locate_install_repo_from(&exe)
+}
+
+/// Variant of [`locate_install_repo`] that takes the binary path
+/// explicitly so the search is testable and so [`crate::doctor`] can
+/// surface the same answer without re-entering `current_exe`.
+///
+/// `install.sh` symlinks the built binary into `~/.local/bin/`, and on
+/// macOS `current_exe()` returns the launch path verbatim (the symlink),
+/// not the canonical target. Without resolving symlinks the upward
+/// walk hits `~/.local/`, `~/`, `/` — none of which contain `.git` —
+/// and `cc-connect upgrade` fails for every symlink-launched install.
+pub(crate) fn locate_install_repo_from(exe: &Path) -> Result<PathBuf> {
+    let resolved = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let mut dir = resolved
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("current_exe has no parent: {}", exe.display()))?
+        .ok_or_else(|| anyhow::anyhow!("current_exe has no parent: {}", resolved.display()))?
         .to_path_buf();
     for _ in 0..6 {
         if dir.join(".git").exists() {
@@ -375,7 +389,7 @@ fn locate_install_repo() -> Result<PathBuf> {
     anyhow::bail!(
         "could not locate cc-connect install repo above {} — is the binary running from a non-git location? \
          Re-run upgrade from inside the cc-connect clone.",
-        exe.display()
+        resolved.display()
     );
 }
 
@@ -856,5 +870,55 @@ mod tests {
         for path in &candidates {
             assert!(!path.exists(), "expected {} to be purged", path.display());
         }
+    }
+
+    /// Regression: `cc-connect upgrade` launched from a `~/.local/bin/`
+    /// symlink failed with "could not locate cc-connect install repo
+    /// above /Users/.../.local/bin/cc-connect". The fix is to
+    /// canonicalize the exe path before walking up.
+    #[test]
+    fn locate_install_repo_from_resolves_symlinked_launch() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Mock checkout: <tmp>/checkout/.git + <tmp>/checkout/target/release/cc-connect
+        let checkout = tmp.path().join("checkout");
+        let bin_dir = checkout.join("target").join("release");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir(checkout.join(".git")).unwrap();
+        let real_bin = bin_dir.join("cc-connect");
+        std::fs::write(&real_bin, b"").unwrap();
+
+        // Mock `~/.local/bin/cc-connect` → checkout/target/release/cc-connect.
+        let link_dir = tmp.path().join("local-bin");
+        std::fs::create_dir(&link_dir).unwrap();
+        let link = link_dir.join("cc-connect");
+        symlink(&real_bin, &link).unwrap();
+
+        let found = locate_install_repo_from(&link).expect("symlink launch should resolve");
+        // canonicalize() also resolves the tempdir prefix on macOS
+        // (/var/folders/... → /private/var/folders/...), so compare the
+        // canonical forms rather than raw paths.
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(&checkout).unwrap(),
+        );
+    }
+
+    /// And the negative path: launched from a directory tree that has
+    /// no `.git` ancestor, we still produce the original error so the
+    /// user gets the actionable "re-run from inside the clone" hint.
+    #[test]
+    fn locate_install_repo_from_errors_outside_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("cc-connect");
+        std::fs::write(&bin, b"").unwrap();
+
+        let err = locate_install_repo_from(&bin).expect_err("no .git ancestor → error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("could not locate cc-connect install repo"),
+            "unexpected error: {msg}"
+        );
     }
 }
